@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: 2026 Mehver (https://github.com/Mehver)
+# SPDX-License-Identifier: BSD-3-Clause
+name: Disposable Run Template
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        type: choice
+        description: Which disposable template task to run
+        options:
+          - 2026-09-13-example
+      dry_run:
+        type: boolean
+        default: true
+      confirm:
+        type: string
+        description: Type YES to run a non-dry-run disposable task
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    if: ${{ github.event.inputs.dry_run == 'true' || github.event.inputs.confirm == 'YES' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Run no-op template
+        if: ${{ github.event.inputs.target == '2026-09-13-example' }}
+        run: python3 .github/disposable/2026-09-13-example/example.py
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run }}

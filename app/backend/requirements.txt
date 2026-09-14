@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 Mehver (https://github.com/Mehver)
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# Runtime dependencies (all permissively licensed: MIT or HPND).
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+remappable-file-gateway==1.0.0
+httpx>=0.27,<1
+pillow>=10,<13

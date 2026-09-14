@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: 2026 Mehver (https://github.com/Mehver)
+# SPDX-License-Identifier: BSD-3-Clause
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# ---- Node / frontend ----
+node_modules/
+.pnpm-store/
+.pnpm-debug.log*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+app/frontend/build/
+app/frontend/dist/
+
+# ---- Runtime artifacts (never commit app data) ----
+*.snapshot.zip
+*.snapshot.zip.tmp-*
+exports/
+*.log
+
+# ---- Local configuration ----
+.env
+.env.*
+!.env.example
+/app/.env
+/app/.env.*
+!/app/.env.example
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+/data
+
+# ---- Local instructions (never publish) ----
+/local/

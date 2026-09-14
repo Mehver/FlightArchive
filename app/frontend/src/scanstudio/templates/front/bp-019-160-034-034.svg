@@ -1,0 +1,10 @@
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
+<svg xmlns="http://www.w3.org/2000/svg" width="247" height="100" viewBox="0 0 247 100">
+  <defs>
+    <pattern id="h1" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" stroke="black" stroke-width="0.6"/></pattern>
+    <pattern id="h2" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(-45)"><line x1="0" y1="0" x2="0" y2="6" stroke="black" stroke-width="0.6"/></pattern>
+  </defs>
+  <rect x="0" y="0" width="19" height="100" fill="url(#h1)"/><rect x="19" y="0" width="160" height="100" fill="url(#h2)"/><rect x="179" y="0" width="34" height="100" fill="url(#h1)"/><rect x="213" y="0" width="34" height="100" fill="url(#h2)"/>
+  <rect x="0.5" y="0.5" width="246" height="99" fill="none" stroke="black" stroke-width="1" stroke-dasharray="4,3"/>
+  <line x1="19" y1="0" x2="19" y2="100" stroke="black" stroke-width="1" stroke-dasharray="4,3"/><line x1="179" y1="0" x2="179" y2="100" stroke="black" stroke-width="1" stroke-dasharray="4,3"/><line x1="213" y1="0" x2="213" y2="100" stroke="black" stroke-width="1" stroke-dasharray="4,3"/>
+</svg>

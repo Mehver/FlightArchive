@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<!--
+BSD 3-Clause License
+
+Copyright (c) 2026 Mehver (https://github.com/Mehver). All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Document edge detection demo</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#111; color:#ddd; font-family:system-ui,sans-serif; padding:20px; max-width:1200px; margin:0 auto; }
+h1 { font-size:20px; margin-bottom:12px; }
+.toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:14px; }
+.toolbar label { font-size:13px; color:#aaa; }
+.toolbar select { background:#333; color:#ddd; border:1px solid #555; border-radius:4px; padding:5px 8px; font-size:13px; cursor:pointer; }
+.toolbar select:focus { outline:none; border-color:#1976d2; }
+.toolbar input[type="file"] { font-size:13px; color:#ccc; }
+.toolbar button { padding:7px 18px; border:none; border-radius:5px; cursor:pointer; font-size:13px; font-weight:600; transition:opacity .15s; }
+.toolbar button:hover { opacity:.85; }
+.btn-primary { background:#1976d2; color:#fff; }
+.btn-success { background:#2e7d32; color:#fff; }
+.btn-danger { background:#c62828; color:#fff; }
+button:disabled { opacity:.4; cursor:not-allowed; }
+.status { font-size:12px; color:#888; flex-basis:100%; margin-left:0; margin-top:4px; }
+.main-area { display:flex; gap:16px; flex-wrap:wrap; }
+.img-panel { flex:2; min-width:400px; position:relative; background:#222; border-radius:6px; overflow:hidden; }
+.img-panel canvas { display:block; width:100%; height:auto; }
+.result-panel { flex:1; min-width:280px; background:#222; border-radius:6px; padding:14px; }
+.result-panel h3 { font-size:14px; margin-bottom:10px; color:#fff; }
+.result-panel canvas { width:100%; display:block; background:#333; border-radius:4px; }
+.info-box { font-size:11px; color:#999; margin-top:10px; line-height:1.6; word-break:break-all; }
+.info-box .val { color:#fff; }
+.controls-row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:12px; }
+.controls-row label { font-size:12px; color:#aaa; }
+.controls-row input[type="range"] { width:140px; accent-color:#1976d2; }
+.controls-row .deg { font-size:12px; color:#fff; min-width:32px; }
+.controls-row input[type="number"] { width:72px; background:#333; color:#ddd; border:1px solid #555; border-radius:4px; padding:4px 6px; font-size:13px; }
+.controls-row input[type="number"]:focus { outline:none; border-color:#1976d2; }
+.controls-row .lock-label { display:inline-flex; align-items:center; gap:4px; cursor:pointer; font-size:12px; color:#aaa; }
+.controls-row .lock-label input[type="checkbox"] { accent-color:#1976d2; }
+.zoom-controls {
+  position:absolute; bottom:12px; right:12px;
+  display:flex; flex-direction:column; align-items:center;
+  gap:3px; z-index:10; user-select:none;
+  pointer-events:auto;
+}
+.zoom-controls button {
+  width:30px; height:30px; border:none; border-radius:4px;
+  background:rgba(0,0,0,0.5); color:#fff;
+  font-size:19px; line-height:1; cursor:pointer;
+  transition:background .15s;
+  display:flex; align-items:center; justify-content:center;
+}
+.zoom-controls button:hover { background:rgba(0,0,0,0.75); }
+.zoom-controls .zoom-level {
+  font-size:11px; color:#ccc;
+  background:rgba(0,0,0,0.4); padding:2px 6px; border-radius:3px;
+}
+</style>
+</head>
+<body>
+
+<h1>Document edge detection demo</h1>
+
+<div class="toolbar">
+  <input type="file" id="fileInput" accept="image/*">
+  <label for="modelSelect">模型:</label>
+  <select id="modelSelect">
+    <option value="adaptive">自适应阈值 (当前)</option>
+    <option value="canny">Canny 边缘</option>
+    <option value="sobel">Sobel 梯度</option>
+    <option value="laplacian">Laplacian of Gaussian</option>
+  </select>
+  <button id="detectBtn" class="btn-primary" disabled>检测边缘</button>
+  <button id="cropBtn" class="btn-success" disabled>裁切并展示</button>
+  <button id="resetBtn" class="btn-danger" disabled>重置</button>
+  <button id="downloadBtn" class="btn-success" disabled>下载裁切结果</button>
+  <span class="status" id="status">请上传图片</span>
+</div>
+
+<div class="main-area">
+  <div class="img-panel" id="imgPanel">
+    <canvas id="mainCanvas"></canvas>
+    <div class="zoom-controls">
+      <button id="zoomInBtn" title="放大">+</button>
+      <span class="zoom-level" id="zoomLevelDisplay">100%</span>
+      <button id="zoomOutBtn" title="缩小">−</button>
+    </div>
+  </div>
+  <div class="result-panel">
+    <h3>裁切结果</h3>
+    <canvas id="resultCanvas"></canvas>
+    <div class="controls-row">
+      <label>旋转:</label>
+      <input type="range" id="rotSlider" min="-45" max="45" value="0" step="0.1">
+      <span class="deg" id="rotDisplay">0.0°</span>
+      <input type="number" id="rotInput" step="0.1" min="-45" max="45" value="0">
+    </div>
+    <div class="controls-row">
+      <label>长宽比:</label>
+      <span class="deg" id="aspectDisplay">-</span>
+      <input type="number" id="aspectInput" step="0.01" min="0.1" value="1">
+      <label class="lock-label"><input type="checkbox" id="aspectLock"> 锁定</label>
+    </div>
+    <div class="info-box" id="infoBox"></div>
+  </div>
+</div>
+
+<!-- OpenCV.js with CDN fallbacks and proper runtime initialization wait. -->
+<script>
+(function () {
+  var OPENCV_CDNS = [
+    'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.12.0-release.1/dist/opencv.js',
+    'https://unpkg.com/@techstark/opencv-js@4.12.0-release.1/dist/opencv.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/opencv.js/4.12.0/opencv.js'
+  ];
+  var DETECTOR = 'docDetector.js';
+
+  function loadScript(src) {
+    return new Promise(function (ok, bad) {
+      var s = document.createElement('script');
+      s.src = src;
+      s.onload = ok;
+      s.onerror = function () { bad(new Error('load failed: ' + src)); };
+      document.head.appendChild(s);
+    });
+  }
+
+  function waitOpenCvRuntime() {
+    return new Promise(function (ok, bad) {
+      var c = window.cv;
+      if (!c) return bad(new Error('opencv-global-missing'));
+      if (typeof c.Mat === 'function') return ok();
+      var t = setTimeout(function () { bad(new Error('opencv-init-timeout')); }, 30000);
+      c.onRuntimeInitialized = function () { clearTimeout(t); ok(); };
+      c.onAbort = function () { clearTimeout(t); bad(new Error('opencv-abort')); };
+    });
+  }
+
+  function loadOpenCv(index) {
+    if (index >= OPENCV_CDNS.length) return Promise.reject(new Error('all OpenCV CDNs failed'));
+    return loadScript(OPENCV_CDNS[index]).then(waitOpenCvRuntime)
+      .catch(function () { return loadOpenCv(index + 1); });
+  }
+
+  loadOpenCv(0)
+    .then(function () { return loadScript(DETECTOR); })
+    .then(function () {
+      if (typeof window.initDocDemo === 'function') {
+        window.initDocDemo();
+      } else {
+        alert('无法加载 docDetector.js，请确认文件存在');
+      }
+    })
+    .catch(function (e) {
+      console.error(e);
+      alert('OpenCV.js 加载失败：所有 CDN 均不可用');
+    });
+})();
+</script>
+<script>
+window.initDocDemo = function () {
+  const fileInput = document.getElementById('fileInput');
+  const detectBtn = document.getElementById('detectBtn');
+  const cropBtn = document.getElementById('cropBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const statusEl = document.getElementById('status');
+  const mainCanvas = document.getElementById('mainCanvas');
+  const resultCanvas = document.getElementById('resultCanvas');
+  const rotSlider = document.getElementById('rotSlider');
+  const rotDisplay = document.getElementById('rotDisplay');
+  const infoBox = document.getElementById('infoBox');
+  const rotInput = document.getElementById('rotInput');
+  const aspectDisplay = document.getElementById('aspectDisplay');
+  const aspectInput = document.getElementById('aspectInput');
+  const aspectLock = document.getElementById('aspectLock');
+  let lockedAspectRatio = 1;
+
+  let sourceImg = null;
+  let result = null;
+  let rectCX = 0, rectCY = 0, rectW = 0, rectH = 0, rectAngle = 0;
+  let dragState = null;
+  let needsRedraw = false;
+  let sourceFileType = '';
+  let zoomLevel = 1;
+  let baseScale = 1;
+  let viewCX = 0, viewCY = 0;
+
+  const HANDLE_RADIUS = 7;
+
+  function fitRectToImage(cx, cy, w, h, angle) {
+    if (!sourceImg) return { cx, cy, w, h };
+    const rad = angle * Math.PI / 180;
+    const halfX = (Math.abs(w * Math.cos(rad)) + Math.abs(h * Math.sin(rad))) / 2;
+    const halfY = (Math.abs(w * Math.sin(rad)) + Math.abs(h * Math.cos(rad))) / 2;
+    const scale = Math.min(1, sourceImg.naturalWidth / (2 * halfX), sourceImg.naturalHeight / (2 * halfY));
+    w *= scale;
+    h *= scale;
+    const boundedHalfX = halfX * scale;
+    const boundedHalfY = halfY * scale;
+    return {
+      cx: Math.min(sourceImg.naturalWidth - boundedHalfX, Math.max(boundedHalfX, cx)),
+      cy: Math.min(sourceImg.naturalHeight - boundedHalfY, Math.max(boundedHalfY, cy)),
+      w,
+      h,
+    };
+  }
+
+  function setRect(cx, cy, w, h, angle) {
+    const fitted = fitRectToImage(cx, cy, w, h, angle);
+    rectCX = fitted.cx; rectCY = fitted.cy; rectW = fitted.w; rectH = fitted.h; rectAngle = angle;
+    rotSlider.value = angle;
+    rotDisplay.textContent = angle.toFixed(1) + '°';
+    rotInput.value = angle.toFixed(1);
+    updateAspectDisplay();
+    needsRedraw = true; draw();
+  }
+
+  function updateAspectDisplay() {
+    if (rectW > 0 && rectH > 0) {
+      const ratio = rectW / rectH;
+      aspectDisplay.textContent = ratio.toFixed(2);
+      if (document.activeElement !== aspectInput) {
+        aspectInput.value = ratio.toFixed(2);
+      }
+      lockedAspectRatio = ratio;
+    }
+  }
+
+  function constrainRect(w, h) {
+    if (!aspectLock.checked || lockedAspectRatio <= 0) return { w: Math.max(60, w), h: Math.max(60, h) };
+    const area = w * h;
+    const nw = Math.sqrt(area * lockedAspectRatio);
+    const nh = area / nw;
+    return { w: Math.max(60, nw), h: Math.max(60, nh) };
+  }
+
+  function getCorners(cx, cy, w, h, angle) {
+    const rad = angle * Math.PI / 180;
+    const c = Math.cos(rad), s = Math.sin(rad);
+    const hw = w / 2, hh = h / 2;
+    return [
+      { x: cx - hw * c + hh * s, y: cy - hw * s - hh * c },
+      { x: cx + hw * c + hh * s, y: cy + hw * s - hh * c },
+      { x: cx + hw * c - hh * s, y: cy + hw * s + hh * c },
+      { x: cx - hw * c - hh * s, y: cy - hw * s + hh * c },
+    ];
+  }
+
+  function pointDist(a, b) {
+    return Math.hypot(a.x - b.x, a.y - b.y);
+  }
+
+  function isInsideRect(px, py, cx, cy, w, h, angle) {
+    const rad = -angle * Math.PI / 180;
+    const c = Math.cos(rad), s = Math.sin(rad);
+    const dx = px - cx, dy = py - cy;
+    const rx = dx * c - dy * s, ry = dx * s + dy * c;
+    return Math.abs(rx) <= w / 2 && Math.abs(ry) <= h / 2;
+  }
+
+  function getRectFromCornerDrag(cornerIdx, mx, my, origCX, origCY, origW, origH, origAngle) {
+    const oppIdx = (cornerIdx + 2) % 4;
+    const origCorners = getCorners(origCX, origCY, origW, origH, origAngle);
+    const opp = origCorners[oppIdx];
+    const rad = origAngle * Math.PI / 180;
+    const c = Math.cos(rad), s = Math.sin(rad);
+    const vx = mx - opp.x, vy = my - opp.y;
+    const projW = vx * c + vy * s;
+    const projH = -vx * s + vy * c;
+    const nw = Math.max(60, Math.abs(projW));
+    const nh = Math.max(60, Math.abs(projH));
+    const ncx = (opp.x + mx) / 2;
+    const ncy = (opp.y + my) / 2;
+    return { cx: ncx, cy: ncy, w: nw, h: nh, angle: origAngle };
+  }
+
+  function draw() {
+    if (!sourceImg) return;
+    const c = mainCanvas;
+    const ctx = c.getContext('2d');
+    const effScale = baseScale * zoomLevel;
+    const viewW = c.width / effScale;
+    const viewH = c.height / effScale;
+    const srcX = viewCX - viewW / 2;
+    const srcY = viewCY - viewH / 2;
+
+    ctx.clearRect(0, 0, c.width, c.height);
+    ctx.drawImage(sourceImg, srcX, srcY, viewW, viewH, 0, 0, c.width, c.height);
+
+    if (!result) return;
+
+    const s = effScale;
+    const ox = c.width / 2 - viewCX * s;
+    const oy = c.height / 2 - viewCY * s;
+    const imgCorners = getCorners(rectCX, rectCY, rectW, rectH, rectAngle);
+    const pts = imgCorners.map(p => ({ x: p.x * s + ox, y: p.y * s + oy }));
+
+    ctx.save();
+    ctx.strokeStyle = '#00ff00';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < 4; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    const handleColors = ['#ff0000','#00ffff','#ffa500','#ff00ff'];
+    for (let i = 0; i < 4; i++) {
+      ctx.beginPath();
+      ctx.arc(pts[i].x, pts[i].y, HANDLE_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = handleColors[i];
+      ctx.fill();
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+
+    ctx.beginPath();
+    ctx.arc(rectCX * s + ox, rectCY * s + oy, 5, 0, Math.PI * 2);
+    ctx.fillStyle = '#ff0';
+    ctx.fill();
+    ctx.restore();
+
+    needsRedraw = false;
+  }
+
+  function getMousePos(e) {
+    const rect = mainCanvas.getBoundingClientRect();
+    const scaleX = mainCanvas.width / rect.width;
+    const scaleY = mainCanvas.height / rect.height;
+    const canvasX = (e.clientX - rect.left) * scaleX;
+    const canvasY = (e.clientY - rect.top) * scaleY;
+
+    const effScale = baseScale * zoomLevel;
+    const viewW = mainCanvas.width / effScale;
+    const viewH = mainCanvas.height / effScale;
+
+    return {
+      x: viewCX - viewW / 2 + (canvasX / mainCanvas.width) * viewW,
+      y: viewCY - viewH / 2 + (canvasY / mainCanvas.height) * viewH,
+    };
+  }
+
+  function hitTest(mx, my) {
+    if (!sourceImg || !result) return null;
+    const effScale = baseScale * zoomLevel;
+    const imgCorners = getCorners(rectCX, rectCY, rectW, rectH, rectAngle);
+
+    for (let i = 0; i < 4; i++) {
+      if (pointDist({ x: mx, y: my }, imgCorners[i]) < (HANDLE_RADIUS + 4) / effScale) {
+        return { type: 'corner', index: i };
+      }
+    }
+
+    if (isInsideRect(mx, my, rectCX, rectCY, rectW, rectH, rectAngle)) {
+      return { type: 'move' };
+    }
+
+    return null;
+  }
+
+  function onMouseDown(e) {
+    if (e.button !== 0) return;
+    const pos = getMousePos(e);
+    const hit = hitTest(pos.x, pos.y);
+
+    if (!hit) {
+      if (zoomLevel > 1) {
+        dragState = { type: 'pan', startX: pos.x, startY: pos.y };
+        mainCanvas.style.cursor = 'grabbing';
+        e.preventDefault();
+      }
+      return;
+    }
+
+    dragState = hit;
+    dragState.startX = pos.x;
+    dragState.startY = pos.y;
+    dragState.origCX = rectCX;
+    dragState.origCY = rectCY;
+    dragState.origW = rectW;
+    dragState.origH = rectH;
+    dragState.origAngle = rectAngle;
+    e.preventDefault();
+  }
+
+  function onMouseMove(e) {
+    const pos = getMousePos(e);
+    mainCanvas.style.cursor = 'default';
+
+    if (dragState) {
+      if (dragState.type === 'pan') {
+        const dx = pos.x - dragState.startX;
+        const dy = pos.y - dragState.startY;
+        viewCX -= dx;
+        viewCY -= dy;
+        dragState.startX = pos.x;
+        dragState.startY = pos.y;
+        needsRedraw = true; draw();
+        return;
+      }
+
+      const dx = pos.x - dragState.startX;
+      const dy = pos.y - dragState.startY;
+
+      if (dragState.type === 'move') {
+        const ncx = dragState.origCX + dx;
+        const ncy = dragState.origCY + dy;
+        setRect(ncx, ncy, rectW, rectH, rectAngle);
+      } else if (dragState.type === 'corner') {
+        const origCorners = getCorners(
+          dragState.origCX, dragState.origCY,
+          dragState.origW, dragState.origH,
+          dragState.origAngle
+        );
+        const mc = { x: origCorners[dragState.index].x + dx, y: origCorners[dragState.index].y + dy };
+        const updated = getRectFromCornerDrag(
+          dragState.index, mc.x, mc.y,
+          dragState.origCX, dragState.origCY,
+          dragState.origW, dragState.origH,
+          dragState.origAngle
+        );
+        if (aspectLock.checked) {
+          const constrained = constrainRect(updated.w, updated.h);
+          setRect(updated.cx, updated.cy, constrained.w, constrained.h, updated.angle);
+        } else {
+          setRect(updated.cx, updated.cy, updated.w, updated.h, updated.angle);
+        }
+      }
+      return;
+    }
+
+    if (sourceImg && result) {
+      const hit = hitTest(pos.x, pos.y);
+      if (hit) {
+        mainCanvas.style.cursor = hit.type === 'corner' ? 'grab' : 'move';
+        return;
+      }
+    }
+    if (sourceImg && zoomLevel > 1) {
+      mainCanvas.style.cursor = 'grab';
+    }
+  }
+
+  function onMouseUp(e) {
+    if (dragState) {
+      dragState = null;
+      if (sourceImg && zoomLevel > 1 && !result) mainCanvas.style.cursor = 'grab';
+      updateInfo();
+    }
+  }
+
+  function resizeCanvas() {
+    if (!sourceImg) return;
+    const panel = document.getElementById('imgPanel');
+    const maxW = panel.clientWidth - 4;
+    baseScale = Math.min(1, maxW / sourceImg.naturalWidth);
+    mainCanvas.width = sourceImg.naturalWidth * baseScale;
+    mainCanvas.height = sourceImg.naturalHeight * baseScale;
+    viewCX = sourceImg.naturalWidth / 2;
+    viewCY = sourceImg.naturalHeight / 2;
+    zoomLevel = 1;
+    updateZoomDisplay();
+    needsRedraw = true; draw();
+  }
+
+  async function runDetection() {
+    if (!sourceImg) return;
+    const modelName = document.getElementById('modelSelect').value;
+    statusEl.textContent = '检测中 (' + modelName + ')...';
+    detectBtn.disabled = true;
+    try {
+      result = await DocDetect.detectWith(sourceImg, modelName);
+      if (!result) {
+        statusEl.textContent = '未找到文档轮廓 (' + modelName + ')';
+        return;
+      }
+      setRect(result.center.x, result.center.y, result.size.width, result.size.height, result.rotation);
+      cropBtn.disabled = false;
+      resetBtn.disabled = false;
+      statusEl.textContent = '检测完成 (' + modelName + ')，请微调裁切框后点击"裁切并展示"';
+      updateInfo();
+    } catch (e) {
+      statusEl.textContent = '检测失败 (' + modelName + '): ' + e.message;
+      console.error(e);
+    } finally {
+      detectBtn.disabled = false;
+    }
+  }
+
+  async function runCrop() {
+    if (!sourceImg || !result) return;
+    statusEl.textContent = '裁切中...';
+    cropBtn.disabled = true;
+    try {
+      sampleRotatedRect(sourceImg, resultCanvas, rectCX, rectCY, rectW, rectH, rectAngle);
+
+      document.getElementById('downloadBtn').disabled = false;
+      statusEl.textContent = '裁切完成';
+    } catch (e) {
+      statusEl.textContent = '裁切失败: ' + e.message;
+      console.error(e);
+    } finally {
+      cropBtn.disabled = false;
+    }
+  }
+
+  function updateInfo() {
+    if (!result) { infoBox.textContent = ''; return; }
+    infoBox.innerHTML =
+      '中心: <span class="val">(' + rectCX.toFixed(1) + ', ' + rectCY.toFixed(1) + ')</span><br>' +
+      '尺寸: <span class="val">' + Math.round(rectW) + ' &times; ' + Math.round(rectH) + '</span> px<br>' +
+      '旋转: <span class="val">' + rectAngle.toFixed(2) + '&deg;</span><br>' +
+      formatDerivedCorners(getCorners(rectCX, rectCY, rectW, rectH, rectAngle));
+  }
+
+  // Canvas angles are clockwise in image coordinates. Map source pixels through
+  // the inverse rotation so the output retains the rectangle's width and height.
+  function sampleRotatedRect(image, canvas, centerX, centerY, width, height, rotationDegrees) {
+    const outputWidth = Math.max(1, Math.round(width));
+    const outputHeight = Math.max(1, Math.round(height));
+    canvas.width = outputWidth;
+    canvas.height = outputHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, outputWidth, outputHeight);
+    ctx.save();
+    ctx.translate(outputWidth / 2, outputHeight / 2);
+    ctx.rotate(-rotationDegrees * Math.PI / 180);
+    ctx.translate(-centerX, -centerY);
+    ctx.drawImage(image, 0, 0);
+    ctx.restore();
+  }
+
+  function formatDerivedCorners(corners) {
+    return '四角（由矩形推导）: TL(' + corners[0].x.toFixed(0) + ',' + corners[0].y.toFixed(0) + ') ' +
+      'TR(' + corners[1].x.toFixed(0) + ',' + corners[1].y.toFixed(0) + ')<br>' +
+      '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BR(' + corners[2].x.toFixed(0) + ',' + corners[2].y.toFixed(0) + ') ' +
+      'BL(' + corners[3].x.toFixed(0) + ',' + corners[3].y.toFixed(0) + ')';
+  }
+
+  function resetAll() {
+    result = null;
+    cropBtn.disabled = true;
+    resetBtn.disabled = true;
+    document.getElementById('downloadBtn').disabled = true;
+    resultCanvas.width = 0;
+    resultCanvas.height = 0;
+    const ctx = resultCanvas.getContext('2d');
+    ctx.clearRect(0, 0, resultCanvas.width, resultCanvas.height);
+    infoBox.textContent = '';
+    statusEl.textContent = sourceImg ? '已加载图片' : '请上传图片';
+    zoomLevel = 1;
+    if (sourceImg) {
+      viewCX = sourceImg.naturalWidth / 2;
+      viewCY = sourceImg.naturalHeight / 2;
+    }
+    updateZoomDisplay();
+    needsRedraw = true; draw();
+  }
+
+  fileInput.addEventListener('change', function (e) {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const img = new Image();
+    img.onload = function () {
+      sourceImg = img;
+      resetAll();
+      resizeCanvas();
+      detectBtn.disabled = false;
+      statusEl.textContent = '图片已加载，点击"检测边缘"';
+    };
+    sourceFileType = file.type;
+    img.src = URL.createObjectURL(file);
+  });
+
+  detectBtn.addEventListener('click', runDetection);
+  cropBtn.addEventListener('click', runCrop);
+  resetBtn.addEventListener('click', resetAll);
+
+  document.getElementById('downloadBtn').addEventListener('click', function () {
+    const w = resultCanvas.width;
+    const h = resultCanvas.height;
+    if (w === 0 || h === 0) return;
+    const isJpeg = sourceFileType === 'image/jpeg';
+    const mimeType = isJpeg ? 'image/jpeg' : 'image/png';
+    const ext = isJpeg ? 'jpg' : 'png';
+    const link = document.createElement('a');
+    resultCanvas.toBlob(function (blob) {
+      link.href = URL.createObjectURL(blob);
+      link.download = 'cropped.' + ext;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }, mimeType, isJpeg ? 1 : undefined);
+  });
+
+  rotSlider.addEventListener('input', function () {
+    setRect(rectCX, rectCY, rectW, rectH, parseFloat(this.value));
+    updateInfo();
+  });
+
+  rotInput.addEventListener('focus', function () {
+    this.dataset.prevValue = this.value;
+  });
+
+  rotInput.addEventListener('blur', function () {
+    const val = parseFloat(this.value);
+    if (isNaN(val) || val < -45 || val > 45) {
+      this.value = this.dataset.prevValue || '0';
+      return;
+    }
+    setRect(rectCX, rectCY, rectW, rectH, val);
+    updateInfo();
+  });
+
+  aspectInput.addEventListener('focus', function () {
+    this.dataset.prevValue = this.value;
+  });
+
+  aspectInput.addEventListener('blur', function () {
+    const val = parseFloat(this.value);
+    if (isNaN(val) || val <= 0) {
+      this.value = this.dataset.prevValue || '1';
+      return;
+    }
+    lockedAspectRatio = val;
+    if (rectW > 0 && rectH > 0) {
+      const area = rectW * rectH;
+      const nw = Math.sqrt(area * val);
+      const nh = area / nw;
+      setRect(rectCX, rectCY, Math.max(60, nw), Math.max(60, nh), rectAngle);
+    }
+  });
+
+  aspectLock.addEventListener('change', function () {
+    if (this.checked && rectW > 0 && rectH > 0) {
+      lockedAspectRatio = rectW / rectH;
+      aspectInput.value = lockedAspectRatio.toFixed(2);
+    }
+  });
+
+  mainCanvas.addEventListener('mousedown', onMouseDown);
+  mainCanvas.addEventListener('mousemove', onMouseMove);
+  mainCanvas.addEventListener('mouseup', onMouseUp);
+  mainCanvas.addEventListener('mouseleave', onMouseUp);
+
+  window.addEventListener('resize', resizeCanvas);
+
+  document.getElementById('zoomInBtn').addEventListener('click', function () {
+    if (!sourceImg) return;
+    zoomLevel = Math.min(zoomLevel * 1.5, 20);
+    updateZoomDisplay();
+    needsRedraw = true; draw();
+  });
+
+  document.getElementById('zoomOutBtn').addEventListener('click', function () {
+    if (!sourceImg) return;
+    zoomLevel = Math.max(zoomLevel / 1.5, 0.2);
+    updateZoomDisplay();
+    needsRedraw = true; draw();
+  });
+
+  mainCanvas.addEventListener('wheel', function (e) {
+    if (!sourceImg) return;
+    e.preventDefault();
+    const pos = getMousePos(e);
+    const old = zoomLevel;
+    if (e.deltaY < 0) {
+      zoomLevel = Math.min(zoomLevel * 1.2, 20);
+    } else {
+      zoomLevel = Math.max(zoomLevel / 1.2, 0.2);
+    }
+    viewCX = pos.x + (viewCX - pos.x) * (zoomLevel / old);
+    viewCY = pos.y + (viewCY - pos.y) * (zoomLevel / old);
+    updateZoomDisplay();
+    needsRedraw = true; draw();
+  }, { passive: false });
+
+  function updateZoomDisplay() {
+    const el = document.getElementById('zoomLevelDisplay');
+    if (el) el.textContent = Math.round(zoomLevel * 100) + '%';
+  }
+
+  updateZoomDisplay();
+  statusEl.textContent = '请上传图片';
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 Mehver (https://github.com/Mehver)
+# SPDX-License-Identifier: BSD-3-Clause
+
+services:
+  flightarchive:
+    container_name: flightarchive
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ${RFG_RESOURCE_HOST_PATH:-../data/resource}:/resource:ro
+      - ${RFG_DATA_HOST_PATH:-../data/runtime}:/data
+    restart: unless-stopped

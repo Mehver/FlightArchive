@@ -1,0 +1,1185 @@
+<!DOCTYPE html>
+<!--
+BSD 3-Clause License
+
+Copyright (c) 2026 Mehver (https://github.com/Mehver). All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Boarding-pass layout demo</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#111; color:#ddd; font-family:system-ui,sans-serif; padding:20px; max-width:1400px; margin:0 auto; }
+h1 { font-size:20px; margin-bottom:10px; }
+h3 { font-size:13px; color:#fff; margin-bottom:6px; border-bottom:1px solid #333; padding-bottom:4px; }
+.toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+.toolbar label { font-size:13px; color:#aaa; }
+.toolbar select { background:#333; color:#ddd; border:1px solid #555; border-radius:4px; padding:5px 8px; font-size:13px; cursor:pointer; }
+.toolbar select:focus { outline:none; border-color:#1976d2; }
+.toolbar input[type="file"] { font-size:13px; color:#ccc; }
+.toolbar button { padding:7px 18px; border:none; border-radius:5px; cursor:pointer; font-size:13px; font-weight:600; transition:opacity .15s; }
+.toolbar button:hover { opacity:.85; }
+.btn-primary { background:#1976d2; color:#fff; }
+.btn-success { background:#2e7d32; color:#fff; }
+.btn-danger { background:#c62828; color:#fff; }
+.btn-info { background:#00838f; color:#fff; }
+button:disabled { opacity:.4; cursor:not-allowed; }
+.status { font-size:12px; color:#888; flex-basis:100%; margin-left:0; margin-top:4px; }
+
+.stage-label { display:flex; align-items:center; gap:8px; margin:16px 0 8px; }
+.stage-label .step-num { width:24px; height:24px; border-radius:50%; background:#1976d2; color:#fff; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+.stage-label .step-text { font-size:15px; color:#ccc; font-weight:600; }
+
+.section { display:flex; gap:16px; flex-wrap:wrap; margin-bottom:10px; }
+.canvas-panel { flex:2.5; min-width:420px; position:relative; background:#1a1a1a; border-radius:6px; overflow:hidden; display:flex; align-items:center; justify-content:center; padding:12px; }
+.canvas-panel canvas { display:block; }
+.control-panel { flex:1; min-width:260px; background:#222; border-radius:6px; padding:12px; display:flex; flex-direction:column; gap:10px; }
+.control-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.control-row label { font-size:11px; color:#aaa; white-space:nowrap; }
+.control-row input[type="range"] { flex:1; min-width:60px; accent-color:#1976d2; }
+.control-row .val { font-size:11px; color:#fff; min-width:36px; text-align:right; }
+.control-row input[type="number"] { width:68px; background:#333; color:#ddd; border:1px solid #555; border-radius:4px; padding:3px 5px; font-size:12px; }
+.control-row input[type="number"]:focus { outline:none; border-color:#1976d2; }
+.control-row .lock-label { display:inline-flex; align-items:center; gap:3px; cursor:pointer; font-size:11px; color:#aaa; }
+.control-row .lock-label input[type="checkbox"] { accent-color:#1976d2; }
+.placement-row { display:flex; gap:4px; flex-wrap:wrap; align-items:center; }
+.placement-row label { font-size:10px; color:#777; display:inline-flex; align-items:center; gap:2px; }
+.placement-row input { width:64px !important; }
+.json-pre { background:#1a1a1a; border-radius:4px; padding:8px; font-size:11px; color:#7c4; overflow:auto; max-height:200px; white-space:pre-wrap; word-break:break-all; line-height:1.4; margin:0; }
+.btn-row { display:flex; gap:8px; flex-wrap:wrap; }
+.btn-row button { padding:5px 12px; border:none; border-radius:4px; cursor:pointer; font-size:11px; font-weight:600; }
+.btn-row button:hover { opacity:.85; }
+.place-toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:4px; }
+.place-toolbar label { font-size:12px; color:#aaa; }
+.place-toolbar select { background:#333; color:#ddd; border:1px solid #555; border-radius:4px; padding:5px 8px; font-size:12px; cursor:pointer; }
+.place-toolbar select:focus { outline:none; border-color:#1976d2; }
+.zoom-ctrls { position:absolute; bottom:8px; right:8px; display:flex; flex-direction:column; align-items:center; gap:2px; z-index:10; user-select:none; pointer-events:auto; }
+.zoom-ctrls button { width:26px; height:26px; border:none; border-radius:4px; background:rgba(0,0,0,0.55); color:#fff; font-size:16px; line-height:1; cursor:pointer; }
+.zoom-ctrls button:hover { background:rgba(0,0,0,0.8); }
+.zoom-ctrls .zoom-level { font-size:10px; color:#ccc; background:rgba(0,0,0,0.4); padding:1px 5px; border-radius:3px; }
+</style>
+</head>
+<body>
+
+<h1>Boarding-pass layout demo</h1>
+
+<!-- === STEP 1: Crop === -->
+<div class="stage-label"><span class="step-num">1</span><span class="step-text">裁切登机牌</span></div>
+
+<div class="toolbar">
+  <input type="file" id="fileInput" accept="image/*">
+  <label for="modelSelect">模型:</label>
+  <select id="modelSelect">
+    <option value="adaptive">自适应阈值 (当前)</option>
+    <option value="canny">Canny 边缘</option>
+    <option value="sobel">Sobel 梯度</option>
+    <option value="laplacian">Laplacian of Gaussian</option>
+  </select>
+  <button id="detectBtn" class="btn-primary" disabled>检测边缘</button>
+  <button id="cropBtn" class="btn-success" disabled>裁切并展示</button>
+  <button id="resetBtn" class="btn-danger" disabled>重置</button>
+  <span class="status" id="cropStatus">请上传登机牌图片</span>
+</div>
+
+<div class="section">
+  <div class="canvas-panel" id="cropPanel">
+    <canvas id="cropCanvas"></canvas>
+    <div class="zoom-ctrls" id="cropZoomCtrls" style="display:none;">
+      <button id="cropZoomInBtn">+</button>
+      <span class="zoom-level" id="cropZoomDisplay">100%</span>
+      <button id="cropZoomOutBtn">−</button>
+    </div>
+  </div>
+  <div class="control-panel">
+    <h3>裁切调整</h3>
+    <div class="control-row">
+      <label>旋转:</label>
+      <input type="range" id="cropRotSlider" min="-45" max="45" value="0" step="0.1">
+      <span class="val" id="cropRotDisplay">0.0°</span>
+      <input type="number" id="cropRotInput" step="0.1" min="-45" max="45" value="0">
+    </div>
+    <div class="control-row">
+      <label>长宽比:</label>
+      <span class="val" id="cropAspectDisplay">-</span>
+      <input type="number" id="cropAspectInput" step="0.01" min="0.1" value="1">
+      <label class="lock-label"><input type="checkbox" id="cropAspectLock" checked>锁定</label>
+    </div>
+    <div class="info-box" id="cropInfoBox" style="font-size:11px;color:#888;line-height:1.5;"></div>
+  </div>
+</div>
+
+<!-- === STEP 2: Place === -->
+<div class="stage-label"><span class="step-num">2</span><span class="step-text">对位到模板</span></div>
+
+<div class="place-toolbar">
+  <label for="svgSelect">背景模板:</label>
+  <select id="svgSelect"></select>
+  <span id="svgInfo" style="font-size:11px;color:#888;"></span>
+  <button id="autoFitBtn" class="btn-info" style="font-size:11px;padding:4px 10px;">自动适配</button>
+</div>
+
+<div class="section">
+  <div class="canvas-panel" id="placePanel" style="position:relative;">
+    <canvas id="placeCanvas" style="cursor:default;"></canvas>
+    <div class="zoom-ctrls" id="placeZoomCtrls">
+      <button id="placeZoomInBtn">+</button>
+      <span class="zoom-level" id="placeZoomDisplay">100%</span>
+      <button id="placeZoomOutBtn">−</button>
+    </div>
+  </div>
+  <div class="control-panel">
+    <h3>位置调整</h3>
+    <div class="control-row">
+      <label>缩放:</label>
+      <input type="range" id="placeScaleSlider" min="20" max="200" value="100">
+      <span class="val" id="placeScaleDisplay">100%</span>
+    </div>
+    <div class="control-row">
+      <label>旋转:</label>
+      <input type="range" id="placeRotSlider" min="-45" max="45" value="0" step="0.1">
+      <span class="val" id="placeRotDisplay">0.0°</span>
+    </div>
+    <div class="placement-row">
+      <label>X<input type="number" id="placeXInput" step="0.5"></label>
+      <label>Y<input type="number" id="placeYInput" step="0.5"></label>
+      <label>W<input type="number" id="placeWInput" step="0.5"></label>
+      <label>H<input type="number" id="placeHInput" step="0.5"></label>
+    </div>
+    <div class="placement-row" style="margin-top:4px;">
+      <label class="lock-label"><input type="checkbox" id="placeAspectLock" checked>锁定长宽比</label>
+    </div>
+    <div class="placement-row" style="margin-top:6px;">
+      <label class="lock-label"><input type="checkbox" id="placeFlipCb"> 左右翻转模板</label>
+    </div>
+    <button id="doneBtn" class="btn-success" disabled style="padding:8px 20px;font-size:14px;font-weight:700;">完成</button>
+    <h3>JSON 配置</h3>
+    <pre class="json-pre" id="jsonOutput">等待完成操作...</pre>
+    <div class="btn-row">
+      <button id="copyBtn" class="btn-primary" disabled>复制 JSON</button>
+      <button id="downloadBtn" class="btn-primary" disabled>下载 JSON</button>
+    </div>
+  </div>
+</div>
+
+<!-- === STEP 3: Effect === -->
+<div class="stage-label" id="step3Label"><span class="step-num">3</span><span class="step-text">效果展示</span></div>
+
+<div class="section" id="step3Section">
+  <div class="canvas-panel" id="effectPanel">
+    <canvas id="effectCanvas"></canvas>
+  </div>
+  <div class="control-panel">
+    <h3>最终效果</h3>
+    <p style="font-size:11px;color:#888;line-height:1.5;">
+      登机牌按 SVG 模板硬边界裁切遮罩，白色线条为模板参考线，黑色外框为整体边距。
+    </p>
+    <div class="btn-row" style="margin-top:8px;">
+      <button id="downloadEffectBtn" class="btn-success" disabled>下载效果图</button>
+    </div>
+  </div>
+</div>
+
+<!-- OpenCV.js with CDN fallbacks and proper runtime initialization wait. -->
+<script>
+(function () {
+  var OPENCV_CDNS = [
+    'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.12.0-release.1/dist/opencv.js',
+    'https://unpkg.com/@techstark/opencv-js@4.12.0-release.1/dist/opencv.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/opencv.js/4.12.0/opencv.js'
+  ];
+  var DETECTOR = 'docDetector.js';
+
+  function loadScript(src) {
+    return new Promise(function (ok, bad) {
+      var s = document.createElement('script');
+      s.src = src;
+      s.onload = ok;
+      s.onerror = function () { bad(new Error('load failed: ' + src)); };
+      document.head.appendChild(s);
+    });
+  }
+
+  function waitOpenCvRuntime() {
+    return new Promise(function (ok, bad) {
+      var c = window.cv;
+      if (!c) return bad(new Error('opencv-global-missing'));
+      if (typeof c.Mat === 'function') return ok();
+      var t = setTimeout(function () { bad(new Error('opencv-init-timeout')); }, 30000);
+      c.onRuntimeInitialized = function () { clearTimeout(t); ok(); };
+      c.onAbort = function () { clearTimeout(t); bad(new Error('opencv-abort')); };
+    });
+  }
+
+  function loadOpenCv(index) {
+    if (index >= OPENCV_CDNS.length) return Promise.reject(new Error('all OpenCV CDNs failed'));
+    return loadScript(OPENCV_CDNS[index]).then(waitOpenCvRuntime)
+      .catch(function () { return loadOpenCv(index + 1); });
+  }
+
+  loadOpenCv(0)
+    .then(function () { return loadScript(DETECTOR); })
+    .then(function () {
+      if (typeof window.initBpDemo === 'function') {
+        window.initBpDemo();
+      } else {
+        alert('无法加载 docDetector.js，请确认文件存在');
+      }
+    })
+    .catch(function (e) {
+      console.error(e);
+      alert('OpenCV.js 加载失败：所有 CDN 均不可用');
+    });
+})();
+</script>
+<script>
+window.initBpDemo = function () {
+  const svgFiles = [
+    '100(247).svg',
+    '100(179)(068).svg',
+    '100(175)(036)(036).svg',
+    '100(171)(076).svg',
+    '100(171)(038)(038).svg',
+    '100(036)(171)(040).svg',
+    '100(019)(228).svg',
+    '100(019)(160)(068).svg',
+    '100(019)(160)(034)(034).svg',
+    '100(017)(230).svg',
+    '100(017)(160)(070).svg',
+  ];
+
+  // ========== DOM refs ==========
+  const fileInput   = document.getElementById('fileInput');
+  const detectBtn   = document.getElementById('detectBtn');
+  const cropBtn     = document.getElementById('cropBtn');
+  const resetBtn    = document.getElementById('resetBtn');
+  const cropStatus  = document.getElementById('cropStatus');
+  const cropCanvas  = document.getElementById('cropCanvas');
+  const doneBtn     = document.getElementById('doneBtn');
+  const jsonOutput  = document.getElementById('jsonOutput');
+  const copyBtn     = document.getElementById('copyBtn');
+  const downloadBtn = document.getElementById('downloadBtn');
+
+  // ========== CROP STATE ==========
+  let sourceImg = null;
+  let detectResult = null;
+  let rectCX = 0, rectCY = 0, rectW = 0, rectH = 0, rectAngle = 0;
+  let cropDrag = null;
+  let cropZoom = 1, cropBaseScale = 1;
+  let cropViewCX = 0, cropViewCY = 0;
+  let lockedAspectRatio = 1;
+  const CR_HANDLE = 7;
+
+  // ========== PLACE STATE ==========
+  let croppedImg = null;
+  let croppedImgAspect = 1;
+  let placeX = 0, placeY = 0, placeW = 0, placeH = 0, placeRot = 0;
+  let placeSvgFlipped = false;
+  let placeDrag = null;
+  let placeZoom = 1, placeBaseScale = 1;
+  let svgW = 0, svgH = 0, svgFile = '';
+  let svgOverlayImg = null;
+  let svgWhiteImg = null;
+  const PL_HANDLE = 7;
+
+  // ========== SVG SELECT ==========
+  (function () {
+    const sel = document.getElementById('svgSelect');
+    sel.innerHTML = svgFiles.map(f => '<option value="'+f+'">'+f+'</option>').join('');
+  })();
+
+  // ================================
+  //  CROP – helpers
+  // ================================
+  function crCorners(cx, cy, w, h, a) {
+    const r = a * Math.PI / 180;
+    const c = Math.cos(r), s = Math.sin(r);
+    const hw = w / 2, hh = h / 2;
+    return [
+      { x: cx - hw*c + hh*s, y: cy - hw*s - hh*c },
+      { x: cx + hw*c + hh*s, y: cy + hw*s - hh*c },
+      { x: cx + hw*c - hh*s, y: cy + hw*s + hh*c },
+      { x: cx - hw*c - hh*s, y: cy - hw*s + hh*c },
+    ];
+  }
+  function crDist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+  function crInside(px, py, cx, cy, w, h, a) {
+    const r = -a * Math.PI / 180;
+    const c = Math.cos(r), s = Math.sin(r);
+    const dx = px - cx, dy = py - cy;
+    const rx = dx*c - dy*s, ry = dx*s + dy*c;
+    return Math.abs(rx) <= w/2 && Math.abs(ry) <= h/2;
+  }
+  function crCornerDrag(idx, mx, my, ocx, ocy, ow, oh, oa) {
+    const opp = crCorners(ocx, ocy, ow, oh, oa)[(idx + 2) % 4];
+    const r = oa * Math.PI / 180;
+    const c = Math.cos(r), s = Math.sin(r);
+    const vx = mx - opp.x, vy = my - opp.y;
+    const pw = vx*c + vy*s, ph = -vx*s + vy*c;
+    const nw = Math.max(60, Math.abs(pw));
+    const nh = Math.max(60, Math.abs(ph));
+    const ncx = (opp.x + mx)/2, ncy = (opp.y + my)/2;
+    return { cx: ncx, cy: ncy, w: nw, h: nh, a: oa };
+  }
+
+  function crFitRectToImage(cx, cy, w, h, a) {
+    if (!sourceImg) return { cx, cy, w, h };
+    const r = a * Math.PI / 180;
+    const halfX = (Math.abs(w * Math.cos(r)) + Math.abs(h * Math.sin(r))) / 2;
+    const halfY = (Math.abs(w * Math.sin(r)) + Math.abs(h * Math.cos(r))) / 2;
+    const scale = Math.min(1, sourceImg.naturalWidth / (2 * halfX), sourceImg.naturalHeight / (2 * halfY));
+    w *= scale;
+    h *= scale;
+    const boundedHalfX = halfX * scale;
+    const boundedHalfY = halfY * scale;
+    return {
+      cx: Math.min(sourceImg.naturalWidth - boundedHalfX, Math.max(boundedHalfX, cx)),
+      cy: Math.min(sourceImg.naturalHeight - boundedHalfY, Math.max(boundedHalfY, cy)),
+      w,
+      h,
+    };
+  }
+
+  function crSetRect(cx, cy, w, h, a) {
+    const fitted = crFitRectToImage(cx, cy, w, h, a);
+    rectCX = fitted.cx; rectCY = fitted.cy; rectW = fitted.w; rectH = fitted.h; rectAngle = a;
+    document.getElementById('cropRotSlider').value = a;
+    document.getElementById('cropRotDisplay').textContent = a.toFixed(1) + '°';
+    document.getElementById('cropRotInput').value = a.toFixed(1);
+    crUpdateAspect();
+    crDraw();
+  }
+  function crUpdateAspect() {
+    if (rectW > 0 && rectH > 0) {
+      const r = rectW / rectH;
+      document.getElementById('cropAspectDisplay').textContent = r.toFixed(2);
+      const inp = document.getElementById('cropAspectInput');
+      if (document.activeElement !== inp) inp.value = r.toFixed(2);
+      lockedAspectRatio = r;
+    }
+  }
+  function crConstrain(w, h) {
+    if (!document.getElementById('cropAspectLock').checked || lockedAspectRatio <= 0)
+      return { w: Math.max(60, w), h: Math.max(60, h) };
+    const a = w * h;
+    const nw = Math.sqrt(a * lockedAspectRatio);
+    return { w: Math.max(60, nw), h: Math.max(60, a / nw) };
+  }
+
+  // ================================
+  //  CROP – canvas & draw
+  // ================================
+  function crResizeCanvas() {
+    if (!sourceImg) return;
+    const panel = document.getElementById('cropPanel');
+    const maxW = panel.clientWidth - 4;
+    cropBaseScale = Math.min(1, maxW / sourceImg.naturalWidth);
+    cropCanvas.width = sourceImg.naturalWidth * cropBaseScale;
+    cropCanvas.height = sourceImg.naturalHeight * cropBaseScale;
+    cropViewCX = sourceImg.naturalWidth / 2;
+    cropViewCY = sourceImg.naturalHeight / 2;
+    cropZoom = 1;
+    document.getElementById('cropZoomDisplay').textContent = '100%';
+    crDraw();
+  }
+
+  function crDraw() {
+    if (!sourceImg) return;
+    const c = cropCanvas, ctx = c.getContext('2d');
+    const es = cropBaseScale * cropZoom;
+    const vW = c.width / es, vH = c.height / es;
+    const sx = cropViewCX - vW / 2, sy = cropViewCY - vH / 2;
+    ctx.clearRect(0, 0, c.width, c.height);
+    ctx.drawImage(sourceImg, sx, sy, vW, vH, 0, 0, c.width, c.height);
+    if (!detectResult) return;
+    const s = es, ox = c.width/2 - cropViewCX*s, oy = c.height/2 - cropViewCY*s;
+    const pts = crCorners(rectCX, rectCY, rectW, rectH, rectAngle).map(p => ({ x: p.x*s + ox, y: p.y*s + oy }));
+    ctx.save();
+    ctx.strokeStyle = '#00ff00'; ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]); ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < 4; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
+    const hc = ['#ff0000','#00ffff','#ffa500','#ff00ff'];
+    for (let i = 0; i < 4; i++) {
+      ctx.beginPath();
+      ctx.arc(pts[i].x, pts[i].y, CR_HANDLE, 0, Math.PI*2);
+      ctx.fillStyle = hc[i]; ctx.fill();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.arc(rectCX*s + ox, rectCY*s + oy, 5, 0, Math.PI*2);
+    ctx.fillStyle = '#ff0'; ctx.fill();
+    ctx.restore();
+  }
+
+  function crGetMouse(e) {
+    const rect = cropCanvas.getBoundingClientRect();
+    const sx = cropCanvas.width / rect.width;
+    const sy = cropCanvas.height / rect.height;
+    const cx = (e.clientX - rect.left) * sx;
+    const cy = (e.clientY - rect.top) * sy;
+    const es = cropBaseScale * cropZoom;
+    const vW = cropCanvas.width / es, vH = cropCanvas.height / es;
+    return {
+      x: cropViewCX - vW/2 + (cx / cropCanvas.width) * vW,
+      y: cropViewCY - vH/2 + (cy / cropCanvas.height) * vH,
+    };
+  }
+  function crHitTest(mx, my) {
+    if (!sourceImg || !detectResult) return null;
+    const es = cropBaseScale * cropZoom;
+    const pts = crCorners(rectCX, rectCY, rectW, rectH, rectAngle);
+    for (let i = 0; i < 4; i++)
+      if (crDist({ x: mx, y: my }, pts[i]) < (CR_HANDLE + 4) / es) return { type: 'corner', idx: i };
+    if (crInside(mx, my, rectCX, rectCY, rectW, rectH, rectAngle)) return { type: 'move' };
+    return null;
+  }
+
+  function crUpdateInfo() {
+    const box = document.getElementById('cropInfoBox');
+    if (!detectResult) { box.textContent = ''; return; }
+    box.innerHTML =
+      '中心: <span style="color:#fff;">('+rectCX.toFixed(1)+', '+rectCY.toFixed(1)+')</span><br>'+
+      '尺寸: <span style="color:#fff;">' + Math.round(rectW) + '×' + Math.round(rectH) + '</span> px<br>'+
+      '旋转: <span style="color:#fff;">' + rectAngle.toFixed(2) + '°</span>';
+  }
+
+  // ================================
+  //  CROP – mouse events
+  // ================================
+  cropCanvas.addEventListener('mousedown', function (e) {
+    if (e.button !== 0) return;
+    const p = crGetMouse(e);
+    const hit = crHitTest(p.x, p.y);
+    if (!hit) {
+      if (cropZoom > 1) {
+        cropDrag = { type: 'pan', sx: p.x, sy: p.y };
+        cropCanvas.style.cursor = 'grabbing';
+        e.preventDefault();
+      }
+      return;
+    }
+    cropDrag = { ...hit, sx: p.x, sy: p.y, ocx: rectCX, ocy: rectCY, ow: rectW, oh: rectH, oa: rectAngle };
+    e.preventDefault();
+  });
+  cropCanvas.addEventListener('mousemove', function (e) {
+    const p = crGetMouse(e);
+    cropCanvas.style.cursor = 'default';
+    if (cropDrag) {
+      if (cropDrag.type === 'pan') {
+        const dx = p.x - cropDrag.sx, dy = p.y - cropDrag.sy;
+        cropViewCX -= dx; cropViewCY -= dy;
+        cropDrag.sx = p.x; cropDrag.sy = p.y;
+        crDraw(); return;
+      }
+      const dx = p.x - cropDrag.sx, dy = p.y - cropDrag.sy;
+      if (cropDrag.type === 'move') {
+        crSetRect(cropDrag.ocx + dx, cropDrag.ocy + dy, rectW, rectH, rectAngle);
+      } else if (cropDrag.type === 'corner') {
+        const mc = { x: crCorners(cropDrag.ocx, cropDrag.ocy, cropDrag.ow, cropDrag.oh, cropDrag.oa)[cropDrag.idx].x + dx, y: crCorners(cropDrag.ocx, cropDrag.ocy, cropDrag.ow, cropDrag.oh, cropDrag.oa)[cropDrag.idx].y + dy };
+        const u = crCornerDrag(cropDrag.idx, mc.x, mc.y, cropDrag.ocx, cropDrag.ocy, cropDrag.ow, cropDrag.oh, cropDrag.oa);
+        if (document.getElementById('cropAspectLock').checked) {
+          const cn = crConstrain(u.w, u.h);
+          crSetRect(u.cx, u.cy, cn.w, cn.h, u.a);
+        } else {
+          crSetRect(u.cx, u.cy, u.w, u.h, u.a);
+        }
+      }
+      return;
+    }
+    if (sourceImg && detectResult) {
+      const hit = crHitTest(p.x, p.y);
+      if (hit) { cropCanvas.style.cursor = hit.type === 'corner' ? 'grab' : 'move'; return; }
+    }
+    if (sourceImg && cropZoom > 1) cropCanvas.style.cursor = 'grab';
+  });
+  cropCanvas.addEventListener('mouseup', function () {
+    if (cropDrag) { cropDrag = null; crUpdateInfo(); }
+  });
+  cropCanvas.addEventListener('mouseleave', function () {
+    if (cropDrag) { cropDrag = null; crUpdateInfo(); }
+  });
+  cropCanvas.addEventListener('wheel', function (e) {
+    if (!sourceImg) return;
+    e.preventDefault();
+    const p = crGetMouse(e);
+    const old = cropZoom;
+    cropZoom = e.deltaY < 0 ? Math.min(cropZoom * 1.2, 20) : Math.max(cropZoom / 1.2, 0.2);
+    cropViewCX = p.x + (cropViewCX - p.x) * (cropZoom / old);
+    cropViewCY = p.y + (cropViewCY - p.y) * (cropZoom / old);
+    document.getElementById('cropZoomDisplay').textContent = Math.round(cropZoom * 100) + '%';
+    crDraw();
+  }, { passive: false });
+
+  // ================================
+  //  CROP – detection & cropping
+  // ================================
+  async function runDetection() {
+    if (!sourceImg) return;
+    const model = document.getElementById('modelSelect').value;
+    cropStatus.textContent = '检测中 (' + model + ')...';
+    detectBtn.disabled = true;
+    try {
+      detectResult = await DocDetect.detectWith(sourceImg, model);
+      if (!detectResult) { cropStatus.textContent = '未找到登机牌轮廓 (' + model + ')'; return; }
+      crSetRect(detectResult.center.x, detectResult.center.y, detectResult.size.width, detectResult.size.height, detectResult.rotation);
+      cropBtn.disabled = false;
+      resetBtn.disabled = false;
+      cropStatus.textContent = '检测完成 (' + model + ')，请微调裁切框后点击"裁切并展示"';
+      crUpdateInfo();
+    } catch (e) {
+      cropStatus.textContent = '检测失败 (' + model + '): ' + e.message;
+    } finally { detectBtn.disabled = false; }
+  }
+
+  async function runCrop() {
+    if (!sourceImg || !detectResult) return;
+    cropStatus.textContent = '裁切中...';
+    cropBtn.disabled = true;
+    try {
+      const tmp = document.createElement('canvas');
+      sampleRotatedRect(sourceImg, tmp, rectCX, rectCY, rectW, rectH, rectAngle);
+      croppedImg = new Image();
+      croppedImg.onload = function () {
+        croppedImgAspect = croppedImg.naturalWidth / croppedImg.naturalHeight;
+        resetBtn.disabled = false;
+        placeAutoFit();
+        placeDraw();
+        doneBtn.disabled = false;
+        cropStatus.textContent = '裁切完成，请在下方对位';
+      };
+      croppedImg.src = tmp.toDataURL('image/png');
+    } catch (e) {
+      cropStatus.textContent = '裁切失败: ' + e.message;
+    } finally { cropBtn.disabled = false; }
+  }
+
+  function resetAll() {
+    detectResult = null;
+    croppedImg = null; croppedImgAspect = 1;
+    placeX = placeY = placeW = placeH = placeRot = 0;
+    placeSvgFlipped = false;
+    document.getElementById('placeFlipCb').checked = false;
+    svgOverlayImg = null;
+    svgWhiteImg = null;
+    document.getElementById('downloadEffectBtn').disabled = true;
+    doneBtn.disabled = copyBtn.disabled = downloadBtn.disabled = true;
+    jsonOutput.textContent = '等待完成操作...';
+    document.getElementById('cropInfoBox').textContent = '';
+    cropBtn.disabled = resetBtn.disabled = true;
+    cropZoom = 1; placeZoom = 1;
+    document.getElementById('cropZoomDisplay').textContent = '100%';
+    document.getElementById('placeZoomDisplay').textContent = '100%';
+    document.getElementById('placeZoomCtrls').style.display = 'none';
+    if (sourceImg) {
+      cropViewCX = sourceImg.naturalWidth / 2;
+      cropViewCY = sourceImg.naturalHeight / 2;
+      crResizeCanvas();
+    }
+    placeResizeCanvas();
+    crDraw(); placeDraw();
+    cropStatus.textContent = sourceImg ? '已加载图片，点击"检测边缘"' : '请上传登机牌图片';
+  }
+
+  // ================================
+  //  PLACE – helpers
+  // ================================
+  function placeResizeCanvas() {
+    if (svgW === 0) {
+      const panel = document.getElementById('placePanel');
+      const c = document.getElementById('placeCanvas');
+      c.width = panel.clientWidth - 24;
+      c.height = 100;
+      return;
+    }
+    const panel = document.getElementById('placePanel');
+    const maxW = Math.max(400, panel.clientWidth - 32);
+    placeBaseScale = Math.min(3, maxW / svgW);
+    const es = placeBaseScale * placeZoom;
+    const c = document.getElementById('placeCanvas');
+    c.width = svgW * es;
+    c.height = svgH * es;
+    c.style.width = c.width + 'px';
+    c.style.height = c.height + 'px';
+    document.getElementById('placeZoomCtrls').style.display = 'flex';
+  }
+
+  function plScale() { return placeBaseScale * placeZoom; }
+
+  function plSvgToCanvas(sx, sy) { const s = plScale(); return { x: sx*s, y: sy*s }; }
+  function plCanvasToSvg(cx, cy) { const s = plScale(); return { x: cx/s, y: cy/s }; }
+
+  function plGetMouse(e) {
+    const c = document.getElementById('placeCanvas');
+    const r = c.getBoundingClientRect();
+    const sx = c.width / r.width, sy = c.height / r.height;
+    return { x: (e.clientX - r.left) * sx, y: (e.clientY - r.top) * sy };
+  }
+
+  function plInside(sx, sy) {
+    if (placeW <= 0) return false;
+    const cx = placeX + placeW/2, cy = placeY + placeH/2;
+    const r = -placeRot * Math.PI / 180;
+    const c = Math.cos(r), ss = Math.sin(r);
+    const dx = sx - cx, dy = sy - cy;
+    const rx = dx*c - dy*ss, ry = dx*ss + dy*c;
+    return Math.abs(rx) <= placeW/2 + 3 && Math.abs(ry) <= placeH/2 + 3;
+  }
+  function plHandleHit(sx, sy) {
+    if (placeW <= 0) return null;
+    const cx = placeX + placeW/2, cy = placeY + placeH/2;
+    const hr = (PL_HANDLE + 4) / plScale();
+    const hw = placeW/2, hh = placeH/2;
+    const r = placeRot * Math.PI / 180;
+    const c = Math.cos(r), ss = Math.sin(r);
+    const corners = [
+      { dx: -hw, dy: -hh }, { dx: hw, dy: -hh },
+      { dx: hw, dy: hh }, { dx: -hw, dy: hh },
+    ];
+    for (let i = 0; i < 4; i++) {
+      const wx = cx + corners[i].dx*c - corners[i].dy*ss;
+      const wy = cy + corners[i].dx*ss + corners[i].dy*c;
+      if (Math.hypot(sx - wx, sy - wy) < hr) return { type: 'corner', idx: i };
+    }
+    if (plInside(sx, sy)) return { type: 'move' };
+    return null;
+  }
+
+  // ================================
+  //  PLACE – draw
+  // ================================
+  function placeDraw() {
+    const c = document.getElementById('placeCanvas'), ctx = c.getContext('2d');
+    ctx.clearRect(0, 0, c.width, c.height);
+    ctx.fillStyle = '#222';
+    ctx.fillRect(0, 0, c.width, c.height);
+
+    const s = plScale();
+
+    if (croppedImg && placeW > 0) {
+      const scp = plSvgToCanvas(placeX, placeY);
+      const pw = placeW * s, ph = placeH * s;
+      const cx = scp.x + pw/2, cy = scp.y + ph/2;
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(placeRot * Math.PI / 180);
+      ctx.drawImage(croppedImg, -pw/2, -ph/2, pw, ph);
+      ctx.strokeStyle = '#ff0'; ctx.lineWidth = 2.5; ctx.setLineDash([]);
+      ctx.strokeRect(-pw/2, -ph/2, pw, ph);
+      ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+      ctx.strokeRect(-pw/2, -ph/2, pw, ph); ctx.setLineDash([]);
+      const hc = ['#ff0000','#00ffff','#ffa500','#ff00ff'];
+      const hw2 = pw/2, hh2 = ph/2;
+      for (let i = 0; i < 4; i++) {
+        const hx = i === 0 || i === 3 ? -hw2 : hw2;
+        const hy = i < 2 ? -hh2 : hh2;
+        ctx.beginPath();
+        ctx.arc(hx, hy, PL_HANDLE, 0, Math.PI*2);
+        ctx.fillStyle = hc[i]; ctx.fill();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    if (svgOverlayImg) {
+      ctx.save();
+      ctx.globalAlpha = 0.55;
+      if (placeSvgFlipped) {
+        ctx.translate(c.width, 0);
+        ctx.scale(-1, 1);
+      }
+      ctx.drawImage(svgOverlayImg, 0, 0, c.width, c.height);
+      ctx.restore();
+    }
+  }
+
+  function placeSyncInputs() {
+    document.getElementById('placeScaleSlider').value = Math.round((placeW / (svgW * 0.85)) * 100);
+    document.getElementById('placeScaleDisplay').textContent = document.getElementById('placeScaleSlider').value + '%';
+    document.getElementById('placeRotSlider').value = Math.round(placeRot * 10) / 10;
+    document.getElementById('placeRotDisplay').textContent = placeRot.toFixed(1) + '°';
+    document.getElementById('placeXInput').value = placeX.toFixed(1);
+    document.getElementById('placeYInput').value = placeY.toFixed(1);
+    document.getElementById('placeWInput').value = placeW.toFixed(1);
+    document.getElementById('placeHInput').value = placeH.toFixed(1);
+  }
+
+  function placeAutoFit() {
+    if (!croppedImg || svgW === 0) return;
+    const sAspect = svgW / svgH;
+    if (croppedImgAspect > sAspect) {
+      placeW = svgW * 0.9;
+      placeH = placeW / croppedImgAspect;
+    } else {
+      placeH = svgH * 0.9;
+      placeW = placeH * croppedImgAspect;
+    }
+    placeX = (svgW - placeW) / 2;
+    placeY = (svgH - placeH) / 2;
+    placeRot = 0;
+    placeSyncInputs();
+    document.getElementById('placeRotSlider').value = 0;
+    document.getElementById('placeRotDisplay').textContent = '0.0°';
+    placeDraw();
+  }
+
+  function placeUpdateFromScale() {
+    if (!croppedImg || svgW === 0) return;
+    const sp = parseFloat(document.getElementById('placeScaleSlider').value) / 100;
+    const bw = svgW * 0.85;
+    const bh = bw / croppedImgAspect;
+    const nw = bw * sp, nh = bh * sp;
+    const ox = placeX + placeW/2, oy = placeY + placeH/2;
+    placeW = nw; placeH = nh;
+    placeX = ox - placeW/2; placeY = oy - placeH/2;
+    placeSyncInputs(); placeDraw();
+  }
+
+  function placeUpdateFromInputs() {
+    const nx = parseFloat(document.getElementById('placeXInput').value) || 0;
+    const ny = parseFloat(document.getElementById('placeYInput').value) || 0;
+    const nw = parseFloat(document.getElementById('placeWInput').value) || placeW;
+    const nh = parseFloat(document.getElementById('placeHInput').value) || placeH;
+    if (document.getElementById('placeAspectLock').checked && croppedImgAspect > 0) {
+      const a = nw * nh;
+      placeW = Math.sqrt(a * croppedImgAspect);
+      placeH = placeW / croppedImgAspect;
+    } else { placeW = nw; placeH = nh; }
+    placeX = nx; placeY = ny;
+    placeRot = parseFloat(document.getElementById('placeRotSlider').value) || 0;
+    placeSyncInputs(); placeDraw();
+  }
+
+  // ================================
+  //  PLACE – mouse events
+  // ================================
+  const placeCanvas = document.getElementById('placeCanvas');
+  placeCanvas.addEventListener('mousedown', function (e) {
+    if (e.button !== 0) return;
+    if (!croppedImg || placeW <= 0) return;
+    const cp = plGetMouse(e);
+    const sp = plCanvasToSvg(cp.x, cp.y);
+    const hit = plHandleHit(sp.x, sp.y);
+    if (hit) {
+      placeDrag = { ...hit, scx: cp.x, scy: cp.y, ox: placeX, oy: placeY, ow: placeW, oh: placeH, or: placeRot };
+      placeCanvas.style.cursor = hit.type === 'move' ? 'grabbing' : 'nwse-resize';
+      e.preventDefault();
+    }
+  });
+  placeCanvas.addEventListener('mousemove', function (e) {
+    const cp = plGetMouse(e);
+    const sp = plCanvasToSvg(cp.x, cp.y);
+    if (placeDrag) {
+      if (placeDrag.type === 'move') {
+        const dsp = plCanvasToSvg(cp.x - placeDrag.scx, cp.y - placeDrag.scy);
+        placeX = placeDrag.ox + dsp.x;
+        placeY = placeDrag.oy + dsp.y;
+        placeSyncInputs(); placeDraw();
+      } else if (placeDrag.type === 'corner') {
+        const oi = (placeDrag.idx + 2) % 4;
+        const ocx = placeDrag.ox + placeDrag.ow/2;
+        const ocy = placeDrag.oy + placeDrag.oh/2;
+        const ohw = placeDrag.ow/2, ohh = placeDrag.oh/2;
+        const r = placeDrag.or * Math.PI / 180;
+        const c = Math.cos(r), ss = Math.sin(r);
+        const oppRelX = oi === 0 || oi === 3 ? -ohw : ohw;
+        const oppRelY = oi < 2 ? -ohh : ohh;
+        const oppX = ocx + oppRelX*c - oppRelY*ss;
+        const oppY = ocy + oppRelX*ss + oppRelY*c;
+        const vx = sp.x - oppX, vy = sp.y - oppY;
+        const pw2 = vx*c + vy*ss, ph2 = -vx*ss + vy*c;
+        const nw = Math.max(10, Math.abs(pw2));
+        const nh = Math.max(10, Math.abs(ph2));
+        if (document.getElementById('placeAspectLock').checked && croppedImgAspect > 0) {
+          const a = nw * nh;
+          placeW = Math.sqrt(a * croppedImgAspect);
+          placeH = placeW / croppedImgAspect;
+        } else { placeW = nw; placeH = nh; }
+        placeX = (oppX + sp.x) / 2 - placeW/2;
+        placeY = (oppY + sp.y) / 2 - placeH/2;
+        placeSyncInputs(); placeDraw();
+      }
+      return;
+    }
+    if (croppedImg && placeW > 0) {
+      const hit = plHandleHit(sp.x, sp.y);
+      placeCanvas.style.cursor = hit ? (hit.type === 'move' ? 'grab' : 'nwse-resize') : 'default';
+    }
+  });
+  placeCanvas.addEventListener('mouseup', function () {
+    if (placeDrag) { placeDrag = null; placeCanvas.style.cursor = croppedImg && placeW > 0 ? 'grab' : 'default'; }
+  });
+  placeCanvas.addEventListener('mouseleave', function () {
+    if (placeDrag) { placeDrag = null; placeCanvas.style.cursor = 'default'; }
+  });
+  placeCanvas.addEventListener('wheel', function (e) {
+    if (!croppedImg || svgW === 0) return;
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    placeZoom = e.deltaY < 0 ? Math.min(placeZoom * 1.15, 5) : Math.max(placeZoom / 1.15, 0.3);
+    document.getElementById('placeZoomDisplay').textContent = Math.round(placeZoom * 100) + '%';
+    placeResizeCanvas(); placeDraw();
+  }, { passive: false });
+
+  // ================================
+  //  PLACE – SVG loading (shared helper)
+  // ================================
+  function fetchSvgColored(filename, strokeColor) {
+    return fetch('./templates/' + filename)
+      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+      .then(svgText => {
+        var colored = svgText.replace(/stroke="black"/g, 'stroke="' + strokeColor + '"');
+        var blob = new Blob([colored], { type: 'image/svg+xml' });
+        var url = URL.createObjectURL(blob);
+        return new Promise(function (resolve, reject) {
+          var img = new Image();
+          img.onload = function () { URL.revokeObjectURL(url); resolve(img); };
+          img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('无法加载 SVG: ' + filename)); };
+          img.src = url;
+        });
+      });
+  }
+
+  function loadSvg(filename) {
+    return fetchSvgColored(filename, 'red').then(function (img) {
+      svgOverlayImg = img;
+      svgW = img.naturalWidth;
+      svgH = img.naturalHeight;
+      svgFile = filename;
+      document.getElementById('svgInfo').textContent = svgW + '×' + svgH;
+      placeResizeCanvas();
+      placeDraw();
+      doneBtn.disabled = !croppedImg;
+    });
+  }
+
+  // ================================
+  //  PLACE – JSON
+  // ================================
+  function generateJSON() {
+    return {
+      version: '1.0',
+      svgBackground: {
+        file: svgFile,
+        size: { width: svgW, height: svgH },
+        flipped: placeSvgFlipped,
+      },
+      imagePlacement: {
+        x: Math.round(placeX * 100) / 100,
+        y: Math.round(placeY * 100) / 100,
+        width: Math.round(placeW * 100) / 100,
+        height: Math.round(placeH * 100) / 100,
+        rotation: Math.round(placeRot * 100) / 100,
+      },
+      cropResult: {
+        centerX: Math.round(rectCX * 100) / 100,
+        centerY: Math.round(rectCY * 100) / 100,
+        width: Math.round(rectW * 100) / 100,
+        height: Math.round(rectH * 100) / 100,
+        rotationDegrees: Math.round(rectAngle * 100) / 100,
+      },
+    };
+  }
+
+  async function drawEffectToCanvas() {
+    if (!sourceImg || svgW <= 0 || !svgWhiteImg) return;
+    if (placeW <= 0 || placeH <= 0) return;
+
+    var targetSvgW = 3000;
+    var effScale = targetSvgW / svgW;
+    var svgDW = Math.round(svgW * effScale);
+    var svgDH = Math.round(svgH * effScale);
+    var border = Math.round(svgDW * 0.05);
+    var c = document.getElementById('effectCanvas');
+    var cw = svgDW + 2 * border;
+    var ch = svgDH + 2 * border;
+    c.width = cw;
+    c.height = ch;
+    var displayW = Math.min(cw, 800);
+    c.style.width = displayW + 'px';
+    c.style.height = Math.round(ch * displayW / cw) + 'px';
+
+    // re-crop from sourceImg at high resolution
+    var cropW = Math.round(placeW * targetSvgW / svgW);
+    var cropH = Math.round(placeH * targetSvgW / svgW);
+
+    // limit to reasonable dimensions to avoid browser OOM
+    var maxDim = 4096;
+    if (cropW > maxDim || cropH > maxDim) {
+      var ratio = Math.min(maxDim / cropW, maxDim / cropH);
+      cropW = Math.round(cropW * ratio);
+      cropH = Math.round(cropH * ratio);
+      effScale = cropW / placeW;
+      svgDW = Math.round(svgW * effScale);
+      svgDH = Math.round(svgH * effScale);
+      border = Math.round(svgDW * 0.05);
+      cw = svgDW + 2 * border;
+      ch = svgDH + 2 * border;
+      c.width = cw;
+      c.height = ch;
+      displayW = Math.min(cw, 800);
+      c.style.width = displayW + 'px';
+      c.style.height = Math.round(ch * displayW / cw) + 'px';
+    }
+
+    var tmpCanvas = document.createElement('canvas');
+    sampleRotatedRect(sourceImg, tmpCanvas, rectCX, rectCY, rectW, rectH, rectAngle, cropW, cropH);
+
+    var ctx = c.getContext('2d');
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, cw, ch);
+
+    if (svgWhiteImg) {
+      if (placeSvgFlipped) {
+        ctx.save();
+        ctx.translate(border + svgDW, border);
+        ctx.scale(-1, 1);
+        ctx.drawImage(svgWhiteImg, 0, 0, svgDW, svgDH);
+        ctx.restore();
+      } else {
+        ctx.drawImage(svgWhiteImg, border, border, svgDW, svgDH);
+      }
+    }
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(border, border, svgDW, svgDH);
+    ctx.clip();
+
+    ctx.translate(border, border);
+    var px = placeX * effScale;
+    var py = placeY * effScale;
+    var pw = placeW * effScale;
+    var ph = placeH * effScale;
+    var icx = px + pw / 2;
+    var icy = py + ph / 2;
+    ctx.translate(icx, icy);
+    ctx.rotate(placeRot * Math.PI / 180);
+    ctx.drawImage(tmpCanvas, -pw / 2, -ph / 2, pw, ph);
+    ctx.restore();
+  }
+
+  // Canvas uses clockwise-positive angles in image coordinates. Applying the
+  // inverse transform maps the selected rotated rectangle into an upright crop.
+  function sampleRotatedRect(image, canvas, centerX, centerY, width, height, rotationDegrees, outputWidth, outputHeight) {
+    const w = Math.max(1, Math.round(outputWidth || width));
+    const h = Math.max(1, Math.round(outputHeight || height));
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, w, h);
+    ctx.save();
+    ctx.translate(w / 2, h / 2);
+    ctx.scale(w / width, h / height);
+    ctx.rotate(-rotationDegrees * Math.PI / 180);
+    ctx.translate(-centerX, -centerY);
+    ctx.drawImage(image, 0, 0);
+    ctx.restore();
+  }
+
+  function onDone() {
+    var j = JSON.stringify(generateJSON(), null, 2);
+    jsonOutput.textContent = j;
+    copyBtn.disabled = false;
+    downloadBtn.disabled = false;
+
+    fetchSvgColored(svgFile, 'white').then(function (whiteImg) {
+      svgWhiteImg = whiteImg;
+      return drawEffectToCanvas();
+    }).then(function () {
+      document.getElementById('downloadEffectBtn').disabled = false;
+    }).catch(function (e) {
+      cropStatus.textContent = '效果图生成失败: ' + e.message;
+    });
+  }
+
+  // ================================
+  //  EVENT BINDINGS
+  // ================================
+  fileInput.addEventListener('change', function (e) {
+    const file = e.target.files[0]; if (!file) return;
+    const img = new Image();
+    img.onload = function () {
+      resetAll();
+      sourceImg = img;
+      detectBtn.disabled = false;
+      crResizeCanvas();
+      document.getElementById('cropZoomCtrls').style.display = 'block';
+      cropStatus.textContent = '图片已加载，点击"检测边缘"';
+      loadSvg(document.getElementById('svgSelect').value);
+    };
+    img.src = URL.createObjectURL(file);
+  });
+
+  detectBtn.addEventListener('click', runDetection);
+  cropBtn.addEventListener('click', runCrop);
+  resetBtn.addEventListener('click', resetAll);
+  doneBtn.addEventListener('click', onDone);
+
+  copyBtn.addEventListener('click', function () {
+    const t = jsonOutput.textContent;
+    if (!t || t === '等待完成操作...') return;
+    navigator.clipboard.writeText(t).then(() => {
+      cropStatus.textContent = 'JSON 已复制到剪贴板';
+    }).catch(() => { cropStatus.textContent = '复制失败'; });
+  });
+
+  downloadBtn.addEventListener('click', function () {
+    const t = jsonOutput.textContent;
+    if (!t || t === '等待完成操作...') return;
+    const blob = new Blob([t], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'boardingpass-config.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+
+  document.getElementById('downloadEffectBtn').addEventListener('click', function () {
+    var c = document.getElementById('effectCanvas');
+    if (c.width === 0) return;
+    var a = document.createElement('a');
+    c.toBlob(function (blob) {
+      a.href = URL.createObjectURL(blob);
+      a.download = 'boardingpass-effect.png';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }, 'image/png');
+  });
+
+  // Crop controls
+  document.getElementById('cropRotSlider').addEventListener('input', function () {
+    crSetRect(rectCX, rectCY, rectW, rectH, parseFloat(this.value));
+    crUpdateInfo();
+  });
+  document.getElementById('cropRotInput').addEventListener('focus', function () { this.dataset.pv = this.value; });
+  document.getElementById('cropRotInput').addEventListener('blur', function () {
+    const v = parseFloat(this.value);
+    if (isNaN(v) || v < -45 || v > 45) { this.value = this.dataset.pv || '0'; return; }
+    crSetRect(rectCX, rectCY, rectW, rectH, v);
+    crUpdateInfo();
+  });
+  document.getElementById('cropAspectInput').addEventListener('focus', function () { this.dataset.pv = this.value; });
+  document.getElementById('cropAspectInput').addEventListener('blur', function () {
+    const v = parseFloat(this.value);
+    if (isNaN(v) || v <= 0) { this.value = this.dataset.pv || '1'; return; }
+    lockedAspectRatio = v;
+    if (rectW > 0 && rectH > 0) {
+      const a = rectW * rectH;
+      const nw = Math.sqrt(a * v);
+      const nh = a / nw;
+      crSetRect(rectCX, rectCY, Math.max(60, nw), Math.max(60, nh), rectAngle);
+    }
+  });
+  document.getElementById('cropAspectLock').addEventListener('change', function () {
+    if (this.checked && rectW > 0 && rectH > 0) {
+      lockedAspectRatio = rectW / rectH;
+      document.getElementById('cropAspectInput').value = lockedAspectRatio.toFixed(2);
+    }
+  });
+
+  // Crop zoom
+  document.getElementById('cropZoomInBtn').addEventListener('click', function () {
+    if (!sourceImg) return;
+    cropZoom = Math.min(cropZoom * 1.5, 20);
+    document.getElementById('cropZoomDisplay').textContent = Math.round(cropZoom * 100) + '%';
+    crDraw();
+  });
+  document.getElementById('cropZoomOutBtn').addEventListener('click', function () {
+    if (!sourceImg) return;
+    cropZoom = Math.max(cropZoom / 1.5, 0.2);
+    document.getElementById('cropZoomDisplay').textContent = Math.round(cropZoom * 100) + '%';
+    crDraw();
+  });
+
+  // Place controls
+  document.getElementById('placeScaleSlider').addEventListener('input', placeUpdateFromScale);
+  document.getElementById('placeRotSlider').addEventListener('input', function () {
+    placeRot = parseFloat(this.value);
+    document.getElementById('placeRotDisplay').textContent = placeRot.toFixed(1) + '°';
+    placeSyncInputs(); placeDraw();
+  });
+  document.getElementById('placeXInput').addEventListener('change', placeUpdateFromInputs);
+  document.getElementById('placeYInput').addEventListener('change', placeUpdateFromInputs);
+  document.getElementById('placeWInput').addEventListener('change', placeUpdateFromInputs);
+  document.getElementById('placeHInput').addEventListener('change', placeUpdateFromInputs);
+  document.getElementById('autoFitBtn').addEventListener('click', placeAutoFit);
+
+  document.getElementById('placeFlipCb').addEventListener('change', function () {
+    placeSvgFlipped = this.checked;
+    placeDraw();
+  });
+
+  // Place zoom
+  document.getElementById('placeZoomInBtn').addEventListener('click', function () {
+    if (!croppedImg || svgW === 0) return;
+    placeZoom = Math.min(placeZoom * 1.5, 5);
+    document.getElementById('placeZoomDisplay').textContent = Math.round(placeZoom * 100) + '%';
+    placeResizeCanvas(); placeDraw();
+  });
+  document.getElementById('placeZoomOutBtn').addEventListener('click', function () {
+    if (!croppedImg || svgW === 0) return;
+    placeZoom = Math.max(placeZoom / 1.5, 0.3);
+    document.getElementById('placeZoomDisplay').textContent = Math.round(placeZoom * 100) + '%';
+    placeResizeCanvas(); placeDraw();
+  });
+
+  // SVG selector
+  document.getElementById('svgSelect').addEventListener('change', function () {
+    cropStatus.textContent = '加载背景模板...';
+    loadSvg(this.value).then(() => {
+      cropStatus.textContent = croppedImg ? '背景已切换，请调整登机牌位置' : '背景已加载';
+    }).catch(function (e) {
+      cropStatus.textContent = 'SVG 加载失败: ' + e.message;
+      alert('SVG 加载失败:\n' + e.message + '\n\n文件: ./templates/' + this.value);
+    });
+  });
+
+  // Resize
+  window.addEventListener('resize', function () {
+    if (sourceImg) crResizeCanvas();
+    if (svgW > 0) { placeResizeCanvas(); placeDraw(); }
+    if (svgWhiteImg) drawEffectToCanvas();
+  });
+
+  // Init
+  loadSvg(document.getElementById('svgSelect').value).catch(function (e) {
+    alert('初始化失败 - 无法加载 SVG 模板:\n' + e.message + '\n\n请确保 templates/ 目录下的 SVG 文件可访问');
+    throw e;
+  });
+  placeResizeCanvas();
+  placeDraw();
+  document.getElementById('cropZoomCtrls').style.display = 'none';
+  document.getElementById('placeZoomCtrls').style.display = 'none';
+};
+</script>
+</body>
+</html>

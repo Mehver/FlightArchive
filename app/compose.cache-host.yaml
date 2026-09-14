@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 Mehver (https://github.com/Mehver)
+# SPDX-License-Identifier: BSD-3-Clause
+
+services:
+  flightarchive:
+    volumes:
+      - type: bind
+        source: ${FLIGHTARCHIVE_CACHE_HOST_PATH:?Set FLIGHTARCHIVE_CACHE_HOST_PATH before using compose.cache-host.yaml}
+        target: /cache

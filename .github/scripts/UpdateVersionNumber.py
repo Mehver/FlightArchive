@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 Mehver (https://github.com/Mehver)
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# NOTE: This script is called by CI — .github/workflows/docker-image.yml
+
+import sys
+
+if len(sys.argv) == 3:
+    OLD_VERSION = sys.argv[1]
+    NEW_VERSION = sys.argv[2]
+else:
+    OLD_VERSION = input('Give the old version number > ')
+    NEW_VERSION = input('Give the new version number > ')
+
+
+def UpdateVersionNumber(filename, encoder, lines_list, old_version, new_version):
+    with open(filename, 'r', encoding=encoder) as file:
+        lines = file.readlines()
+
+    with open(filename, 'w', encoding=encoder) as file:
+        for i, line in enumerate(lines, 1):
+            if i in lines_list:
+                lines[i - 1] = line.replace(old_version, new_version)
+        file.writelines(lines)
+
+
+UpdateVersionNumber('README.md', "utf-8", [3], OLD_VERSION, NEW_VERSION)
+UpdateVersionNumber('docs/README-cn.md', "utf-8", [3], OLD_VERSION, NEW_VERSION)

@@ -1,0 +1,208 @@
+name: FlightArchive Release
+
+on:
+  release:
+    types: [published]
+
+env:
+  IMAGE_NAME: flightarchive
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      deployments: write
+      packages: write
+    env:
+      TZ: Asia/Shanghai
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      # All quality gates run before any registry login, publication, asset upload,
+      # or version-update mutation.
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 11
+
+      - name: Test backend
+        working-directory: ./app/backend
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+          python -m pytest tests -q
+
+      - name: Test and build frontend
+        working-directory: ./app/frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+          pnpm exec vitest run --maxWorkers=4
+          pnpm build
+
+      - name: Find previous release tag
+        id: prev_tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          previous_tag=""
+          for tag in $(gh release list --limit 100 --json tagName --jq '.[].tagName'); do
+            if [ "$tag" != "$RELEASE_TAG" ]; then
+              previous_tag="$tag"
+              break
+            fi
+          done
+          echo "value=$previous_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Update version numbers and save patch
+        if: ${{ steps.prev_tag.outputs.value != '' }}
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          PREVIOUS_TAG: ${{ steps.prev_tag.outputs.value }}
+        run: |
+          python3 .github/scripts/UpdateVersionNumber.py "$PREVIOUS_TAG" "$RELEASE_TAG"
+          if ! git diff --quiet -- README.md docs/README-cn.md; then
+            git diff --binary -- README.md docs/README-cn.md > "$RUNNER_TEMP/version-update.patch"
+          fi
+
+      - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and publish Docker images
+        id: publish_images
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: ./app
+          file: ./app/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/mehver/flightarchive:${{ env.TAG }}
+            ghcr.io/mehver/flightarchive:latest
+            docker.io/mehver/flightarchive:${{ env.TAG }}
+            docker.io/mehver/flightarchive:latest
+
+      - name: Record container image publications
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_DIGEST: ${{ steps.publish_images.outputs.digest }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          record_publication() {
+            environment="$1"
+            description="$2"
+            environment_url="$3"
+            payload="$4"
+            deployment_id="$(
+              jq -cn \
+                --arg ref "$RELEASE_TAG" \
+                --arg environment "$environment" \
+                --arg description "$description" \
+                --argjson payload "$payload" \
+                '{
+                  ref: $ref,
+                  environment: $environment,
+                  description: $description,
+                  auto_merge: false,
+                  required_contexts: [],
+                  production_environment: false,
+                  transient_environment: false,
+                  payload: $payload
+                }' |
+                gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments" --input - --jq '.id'
+            )"
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments/${deployment_id}/statuses" \
+              --raw-field state=success \
+              --raw-field description="$description" \
+              --raw-field environment_url="$environment_url" \
+              --raw-field log_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          }
+
+          record_publication \
+            "dockerhub" \
+            "Published Docker Hub image" \
+            "https://hub.docker.com/r/mehver/flightarchive/tags?name=${RELEASE_TAG}" \
+            "$(jq -cn --arg image "docker.io/mehver/flightarchive:${RELEASE_TAG}" --arg digest "$IMAGE_DIGEST" '{image: $image, digest: $digest}')"
+          record_publication \
+            "ghcr" \
+            "Published GHCR image" \
+            "https://github.com/${GITHUB_REPOSITORY}/pkgs/container/flightarchive" \
+            "$(jq -cn --arg image "ghcr.io/mehver/flightarchive:${RELEASE_TAG}" --arg digest "$IMAGE_DIGEST" '{image: $image, digest: $digest}')"
+
+      - name: Export Docker images for the release
+        run: |
+          for PLATFORM in linux/amd64 linux/arm64; do
+            ARCH="${PLATFORM#linux/}"
+            echo "--- Building ${PLATFORM} ---"
+            docker buildx build \
+              --platform "${PLATFORM}" \
+              --file ./app/Dockerfile \
+              --output "type=docker,dest=flightarchive-${TAG}-docker-${ARCH}.tar" \
+              -t "mehver/flightarchive:${TAG}" \
+              ./app
+            gzip "flightarchive-${TAG}-docker-${ARCH}.tar"
+          done
+
+      - name: Update Docker Hub description
+        continue-on-error: true
+        uses: peter-evans/dockerhub-description@432a30c9e07499fd01da9f8a49f0faf9e0ca5b77 # v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: mehver/flightarchive
+          readme-filepath: ./README.md
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          tag_name: ${{ env.TAG }}
+          files: |
+            flightarchive-${{ env.TAG }}-docker-amd64.tar.gz
+            flightarchive-${{ env.TAG }}-docker-arm64.tar.gz
+
+      - name: Commit version number update
+        if: ${{ steps.prev_tag.outputs.value != '' }}
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ ! -f "$RUNNER_TEMP/version-update.patch" ] || [ ! -s "$RUNNER_TEMP/version-update.patch" ]; then
+            echo "No version number changes; nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git stash
+          git fetch origin "$DEFAULT_BRANCH"
+          git checkout -B version-update-temp "origin/$DEFAULT_BRANCH"
+          git apply --index --3way "$RUNNER_TEMP/version-update.patch"
+          git commit -m "Update version number to ${RELEASE_TAG}"
+          git push origin HEAD:"$DEFAULT_BRANCH"

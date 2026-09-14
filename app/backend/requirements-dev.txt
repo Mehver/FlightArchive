@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Mehver (https://github.com/Mehver)
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# Development/test dependencies on top of the runtime requirements.
+-r requirements.txt
+pytest==9.0.3
