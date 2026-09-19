@@ -69,8 +69,8 @@ function flightFileRows(flight: FlightRecord): FlightFileRow[] {
 
 /** Small row preview: images render their cached thumbnail, every non-image
  *  file shows the same centred generic file icon as the resource picker. */
-function FileRowPreview({ path, imagePreview = true }: { path: string; imagePreview?: boolean }) {
-  if (imagePreview && isImageResource(path)) return <ResourceImage resourcePath={path} size={40} alt={leafName(path)} />;
+function FileRowPreview({ path }: { path: string }) {
+  if (isImageResource(path)) return <ResourceImage resourcePath={path} size={40} alt={leafName(path)} />;
   return (
     <Box
       aria-hidden
@@ -362,10 +362,7 @@ export function FlightDetailDialog({
             <Box component="ul" sx={{ m: 0, p: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 1 }}>
               {fileRows.map((row) => (
                 <Box component="li" key={row.path} sx={{ display: 'flex', alignItems: 'center', gap: 1.25, minWidth: 0 }}>
-                  <FileRowPreview
-                    path={row.path}
-                    imagePreview={!(row.path === flight.electronicBoardingPassResourcePath && flight.electronicBoardingPass?.extraction)}
-                  />
+                  <FileRowPreview path={row.path} />
                   <Box sx={{ flex: '1 1 auto', minWidth: 0 }}>
                     <Typography variant="body2" noWrap title={row.path} sx={{ fontWeight: 600 }}>
                       {leafName(row.path)}

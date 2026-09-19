@@ -220,7 +220,7 @@ describe('FlightDetailDialog files', () => {
     expect(within(list).getAllByTestId('InsertDriveFileOutlinedIcon')).toHaveLength(2);
   });
 
-   it('uses a saved-layout status rather than an image preview for a prepared electronic pass', () => {
+   it('uses an image preview and keeps the saved-layout status for a prepared electronic pass', () => {
     renderWithFiles({
       ...FLIGHT,
       electronicBoardingPassResourcePath: 'objects/mobile-pass.png',
@@ -231,14 +231,13 @@ describe('FlightDetailDialog files', () => {
         },
       },
        boardingPassColor: '#0A141E',
-    });
+     });
 
-    const row = screen.getByText('mobile-pass.png').closest('li')!;
-    expect(within(row).queryByRole('img')).toBeNull();
-    expect(within(row).getByTestId('InsertDriveFileOutlinedIcon')).toBeTruthy();
-    expect(within(row).getByText('Saved Layout')).toBeTruthy();
-    expect(within(row).queryByRole('img', { name: 'Electronic Boarding Pass' })).toBeNull();
-    expect(screen.getByRole('group', { name: 'Boarding Pass Color' }).querySelectorAll('[aria-hidden="true"]')).toHaveLength(1);
+     const row = screen.getByText('mobile-pass.png').closest('li')!;
+     const image = within(row).getByRole('img', { name: 'mobile-pass.png' });
+     expect(image.getAttribute('src')).toBe('/images/objects/mobile-pass.png');
+     expect(within(row).getByText('Saved Layout')).toBeTruthy();
+     expect(screen.getByRole('group', { name: 'Boarding Pass Color' }).querySelectorAll('[aria-hidden="true"]')).toHaveLength(1);
   });
 
   it('omits the file list when nothing is bound', () => {
