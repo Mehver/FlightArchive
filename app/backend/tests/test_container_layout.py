@@ -167,13 +167,26 @@ def test_disposable_template_is_read_only_and_has_no_release_side_effects():
     assert "No repository data, releases, deployments, or Pages content was changed." in script.read_text(encoding="utf-8")
 
 
-def test_version_number_script_updates_only_the_backend_product_version(tmp_path):
-    package = tmp_path / "app" / "backend" / "flightarchive"
-    package.mkdir(parents=True)
-    version_file = package / "__init__.py"
-    version_file.write_text('APP_NAME = "FlightArchive"\n__version__ = "old-tag"\n', encoding="utf-8")
+def test_version_number_script_only_updates_line_three_in_both_readmes(tmp_path):
+    original_readme = ["heading\n", "detail\n", "version old-tag old-tag\n", "old-tag remains\n"]
+    original_chinese_readme = ["标题\n", "说明\n", "版本 old-tag\n", "old-tag 保持不变\n"]
+    (tmp_path / "README.md").write_text("".join(original_readme), encoding="utf-8")
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "README-cn.md").write_text("".join(original_chinese_readme), encoding="utf-8")
 
     script = ROOT / ".github/scripts/UpdateVersionNumber.py"
     subprocess.run([sys.executable, script, "old-tag", "new-tag"], cwd=tmp_path, check=True)
 
-    assert version_file.read_text(encoding="utf-8") == 'APP_NAME = "FlightArchive"\n__version__ = "new-tag"\n'
+    assert (tmp_path / "README.md").read_text(encoding="utf-8").splitlines(keepends=True) == [
+        "heading\n",
+        "detail\n",
+        "version new-tag new-tag\n",
+        "old-tag remains\n",
+    ]
+    assert (docs / "README-cn.md").read_text(encoding="utf-8").splitlines(keepends=True) == [
+        "标题\n",
+        "说明\n",
+        "版本 new-tag\n",
+        "old-tag 保持不变\n",
+    ]

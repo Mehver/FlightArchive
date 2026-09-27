@@ -74,12 +74,6 @@ Run the following container commands from the repository root.
 docker build -f app/Dockerfile -t flightarchive:local app
 ```
 
-The frontend stage downloads `pnpm` and packages from the npm registry. Behind a mirror or a restricted network, point it at a reachable registry:
-
-```shell
-docker build -f app/Dockerfile --build-arg NPM_REGISTRY=https://registry.npmmirror.com -t flightarchive:local app
-```
-
 **Run Docker Image:**
 
 ```shell

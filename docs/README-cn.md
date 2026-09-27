@@ -74,12 +74,6 @@ FlightArchive 提供响应式航班仪表盘、航班与航班参考目录（航
 docker build -f app/Dockerfile -t flightarchive:local app
 ```
 
-前端阶段需要从 npm registry 下载 `pnpm` 与依赖。若使用镜像站或处于受限网络，可通过 `NPM_REGISTRY` 构建参数指定可达的 registry：
-
-```shell
-docker build -f app/Dockerfile --build-arg NPM_REGISTRY=https://registry.npmmirror.com -t flightarchive:local app
-```
-
 **运行 Docker 镜像：**
 
 ```shell
