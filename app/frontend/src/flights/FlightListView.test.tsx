@@ -3,8 +3,7 @@
 
 /**
  * Interaction contract of the archive list view: clicking a row opens the
- * flight detail, while the explicit edit/delete controls fire their own
- * actions without accidentally opening the detail.
+ * flight detail through pointer or keyboard interaction.
  */
 
 // @vitest-environment jsdom
@@ -44,21 +43,17 @@ const FLIGHT: FlightRecord = {
 
 function renderView(props: Partial<Parameters<typeof FlightListView>[0]> = {}) {
   const onOpen = vi.fn();
-  const onEdit = vi.fn();
-  const onDelete = vi.fn();
   render(
     <LanguageProvider>
       <FlightListView
         flights={[FLIGHT]}
         airlineNames={new Map()}
         onOpen={onOpen}
-        onEdit={onEdit}
-        onDelete={onDelete}
         {...props}
       />
     </LanguageProvider>,
   );
-  return { onOpen, onEdit, onDelete };
+  return { onOpen };
 }
 
 describe('FlightListView interactions', () => {
@@ -122,40 +117,15 @@ describe('FlightListView interactions', () => {
   });
 
   it('opens the flight detail when the row is clicked', () => {
-    const { onOpen, onEdit } = renderView();
+    const { onOpen } = renderView();
     fireEvent.click(screen.getByRole('button', { name: /CA1234/ }));
     expect(onOpen).toHaveBeenCalledWith(FLIGHT);
-    expect(onEdit).not.toHaveBeenCalled();
   });
 
   it('opens the flight detail via keyboard Enter', () => {
     const { onOpen } = renderView();
     fireEvent.keyDown(screen.getByRole('button', { name: /CA1234/ }), { key: 'Enter' });
     expect(onOpen).toHaveBeenCalledWith(FLIGHT);
-  });
-
-  it('edits without opening the detail when the edit control is clicked', () => {
-    const { onOpen, onEdit } = renderView();
-    fireEvent.click(screen.getByRole('button', { name: /Edit flight/i }));
-    expect(onEdit).toHaveBeenCalledWith(FLIGHT);
-    expect(onOpen).not.toHaveBeenCalled();
-  });
-
-  it('deletes without opening the detail when the delete control is clicked', () => {
-    const { onOpen, onDelete } = renderView();
-    fireEvent.click(screen.getByRole('button', { name: /Delete flight/i }));
-    expect(onDelete).toHaveBeenCalledWith(FLIGHT);
-    expect(onOpen).not.toHaveBeenCalled();
-  });
-
-  it('hides edit/delete controls in read-only contexts', () => {
-    render(
-      <LanguageProvider>
-        <FlightListView flights={[FLIGHT]} airlineNames={new Map()} onOpen={() => undefined} />
-      </LanguageProvider>,
-    );
-    expect(screen.queryByRole('button', { name: /Edit flight/i })).toBeNull();
-    expect(screen.queryByRole('button', { name: /Delete flight/i })).toBeNull();
   });
 
   it('shows the stored code plus the bilingual unlisted note for an uncatalogued airline', () => {

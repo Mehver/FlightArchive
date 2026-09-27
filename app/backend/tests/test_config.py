@@ -32,7 +32,7 @@ from flightarchive.config import (
     config_path,
     default_config_document,
 )
-from flightarchive.server import create_app
+from flightarchive.server import _directory, create_app
 from flightarchive.thumbnails import (
     DATABASE_PATH,
     ThumbnailStore,
@@ -152,7 +152,7 @@ def test_valid_custom_limits_are_wired_into_store_and_semaphore(tmp_path):
     assert application.state.runtime_config.thumbnails.job_concurrency == 1
     assert application.state.runtime_config.rfg.pillow_image_max_pixels == 3_000_000
     with TestClient(application) as client:
-        assert client.post("/api/resources/sync").json()["added"] == 1
+        assert len(client.post("/api/resources/reconcile").json()["rows"]) == 1
         response = client.get("/images/inbox/ticket.png")
         assert response.status_code == 200
         assert Image.open(io.BytesIO(response.content)).size == (256, 192)
@@ -244,6 +244,32 @@ def test_symlinked_config_is_rejected(tmp_path):
     assert path.is_symlink()
 
 
+def test_dangling_symlinked_config_is_rejected_instead_of_seeded(tmp_path):
+    root, data, cache = _roots(tmp_path)
+    path = config_path(data)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(tmp_path / "missing-config.json", path)
+    with pytest.raises(ConfigError, match="symlink"):
+        create_app(resource_root=root, data_root=data, cache_dir=cache)
+    assert path.is_symlink()
+
+
+@pytest.mark.parametrize("configured", ["", "   \t"])
+def test_directory_uses_default_for_empty_or_whitespace_environment(tmp_path, monkeypatch, configured):
+    default = tmp_path / "default-data"
+    default.mkdir()
+    monkeypatch.setenv("TEST_FLIGHTARCHIVE_DIRECTORY", configured)
+    assert _directory(None, "TEST_FLIGHTARCHIVE_DIRECTORY", str(default), create=False) == default.resolve()
+
+
+@pytest.mark.parametrize("configured", ["", "   \t"])
+def test_directory_uses_default_for_empty_or_whitespace_explicit_value(tmp_path, monkeypatch, configured):
+    default = tmp_path / "default-data"
+    default.mkdir()
+    monkeypatch.delenv("TEST_FLIGHTARCHIVE_DIRECTORY", raising=False)
+    assert _directory(configured, "TEST_FLIGHTARCHIVE_DIRECTORY", str(default), create=False) == default.resolve()
+
+
 def test_non_regular_config_is_rejected(tmp_path):
     root, data, cache = _roots(tmp_path)
     config_path(data).mkdir(parents=True)
@@ -259,19 +285,19 @@ def test_source_byte_boundary_is_enforced_exactly(tmp_path):
     _write_config(data, document)
     application = create_app(resource_root=root, data_root=data, cache_dir=cache)
     with TestClient(application) as client:
-        assert client.post("/api/resources/sync").json()["added"] == 2
+        assert len(client.post("/api/resources/reconcile").json()["rows"]) == 2
         exact = client.get("/images/inbox/exact.png")
         assert exact.status_code == 200
         over = client.get("/images/inbox/over.png")
         assert over.status_code == 415
         assert over.json()["error"]["code"] == "image-too-large"
-    # Store-level gate: exactly the limit passes the byte check (and fails
-    # later as undecodable); one byte more trips the byte limit itself.
-    store = application.state.thumbnail_store
-    with pytest.raises(UnsupportedImageError, match="not a decodable raster image"):
-        store.get_or_create("probe/exact.png", "exact.png", '"exact"', b"x" * store.max_source_bytes)
-    with pytest.raises(UnsupportedImageError, match="byte safety limit"):
-        store.get_or_create("probe/over.png", "over.png", '"over"', b"x" * (store.max_source_bytes + 1))
+        # Store-level gate: exactly the limit passes the byte check (and fails
+        # later as undecodable); one byte more trips the byte limit itself.
+        store = application.state.thumbnail_store
+        with pytest.raises(UnsupportedImageError, match="not a decodable raster image"):
+            store.get_or_create("probe/exact.png", "exact.png", '"exact"', b"x" * store.max_source_bytes)
+        with pytest.raises(UnsupportedImageError, match="byte safety limit"):
+            store.get_or_create("probe/over.png", "over.png", '"over"', b"x" * (store.max_source_bytes + 1))
 
 
 def test_open_stage_decompression_bomb_is_controlled_not_a_500(tmp_path):
@@ -283,7 +309,7 @@ def test_open_stage_decompression_bomb_is_controlled_not_a_500(tmp_path):
         with pytest.raises(UnsupportedImageError, match="pixel safety limit"):
             render_webp(payload)
     with TestClient(application) as client:
-        assert client.post("/api/resources/sync").json()["added"] == 2
+        assert len(client.post("/api/resources/reconcile").json()["rows"]) == 2
         for path in ("inbox/bomb.png", "inbox/bomb.jpg"):
             response = client.get(f"/images/{path}")
             assert response.status_code == 415
@@ -296,7 +322,7 @@ def test_changed_thumbnail_settings_reprofile_existing_cached_preview(tmp_path):
     first = create_app(resource_root=root, data_root=data, cache_dir=cache)
     first_profile = first.state.thumbnail_store.profile
     with TestClient(first) as client:
-        client.post("/api/resources/sync")
+        client.post("/api/resources/reconcile")
         original = client.get("/images/inbox/ticket.png")
         assert original.status_code == 200
         assert Image.open(io.BytesIO(original.content)).size == (512, 384)

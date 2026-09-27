@@ -27,14 +27,6 @@ export interface MappingEntry {
   dhash?: string;
   phash?: string;
 }
-export interface MappingDocument { entries: MappingEntry[] }
-
-/** Mapping document plus the ETag RFG sent with it (null when absent). The
- *  ETag is forwarded as `ifMatch` to FlightArchive mapping mutations so
- *  concurrent mapping changes are detected; this client never issues the
- *  raw RFG PUT /api/v1/meta/map itself. */
-export interface MappingMeta { document: MappingDocument; etag: string | null }
-
 export function resourceUrl(virtualPath: string): string {
   return `/res/${virtualPath.split('/').map(encodeURIComponent).join('/')}`;
 }
@@ -53,16 +45,3 @@ const SVG_PATH = /\.svg$/i;
 export function resourceDisplayUrl(virtualPath: string): string {
   return SVG_PATH.test(virtualPath) ? resourceUrl(virtualPath) : imageUrl(virtualPath);
 }
-
-export const rfg = {
-  async getMappingMeta(signal?: AbortSignal): Promise<MappingMeta> {
-    const response = await fetch('/api/v1/meta/map', { signal });
-    if (!response.ok) throw new Error(`RFG mapping request failed (${response.status})`);
-    return { document: (await response.json()) as MappingDocument, etag: response.headers.get('etag') };
-  },
-  async getMapping(signal?: AbortSignal): Promise<MappingDocument> {
-    return (await rfg.getMappingMeta(signal)).document;
-  },
-  resourceUrl,
-  imageUrl,
-};

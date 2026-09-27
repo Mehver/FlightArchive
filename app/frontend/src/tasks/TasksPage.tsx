@@ -2,14 +2,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 /**
- * Background tasks page: a read-only, polled status view (GET /api/tasks).
- * This page never mutates or clears tasks.
- *
- * Polling is a single chained timeout (never an interval), so requests can
- * never overlap or waterfall: while any task is queued/running the cadence
- * is 1 s, otherwise 5 s. The timer is cancelled when the page unmounts
- * (e.g. on navigation). A manual refresh cancels the scheduled cycle and
- * requests a fresh snapshot when no request is already in flight.
+ * Read-only, log-day-paginated task history. It is mounted only while the
+ * feedback drawer is open. Active tasks drive a chained latest-page poll;
+ * terminal-only history does not poll.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -31,16 +26,17 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import HighlightOffIcon from '@mui/icons-material/HighlightOff';
 import ScheduleIcon from '@mui/icons-material/Schedule';
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import { api } from '../api/client';
-import type { TaskItemRecord, TaskRecord, TaskState } from '../api/types';
+import type { TaskDay, TaskItemRecord, TaskRecord, TaskState } from '../api/types';
 import { PageHeader } from '../components/PageHeader';
 import { EmptyState, ErrorState, LoadingState } from '../components/States';
 import { useTranslation } from '../i18n';
 import { ALGORITHM_LABEL, RESULT_CODE_KEY } from '../resources/FingerprintDialog';
+import { useFeedback, type FeedbackRecord } from '../feedback/FeedbackCenter';
 import {
   countTasksByState,
   isTaskActive,
-  pollDelayMs,
   sortTasksNewestFirst,
   taskProgress,
   taskStateColor,
@@ -49,7 +45,7 @@ import {
 } from './taskDisplay';
 
 const ACTIVE_POLL_MS = 1000;
-const IDLE_POLL_MS = 5000;
+const PAGE_SIZE_DAYS = 3;
 const MONO = { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' } as const;
 const CHIP_COMPACT = { height: 20, fontSize: '0.65rem' } as const;
 /** Status-colored card edge, keyed by the same color scale as the chips. */
@@ -63,6 +59,27 @@ const STATE_BORDER: Record<TaskStateColor, string> = {
 function formatTimestamp(iso: string): string {
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
+}
+
+function formatLogDay(day: string): string {
+  const date = new Date(`${day}T12:00:00Z`);
+  return Number.isNaN(date.getTime())
+    ? day
+    : new Intl.DateTimeFormat(undefined, { dateStyle: 'long', timeZone: 'UTC' }).format(date);
+}
+
+/** Merge pages defensively by log date and task id. New records win so a poll
+ * can replace a running snapshot with its terminal state. */
+function mergeDays(current: readonly TaskDay[], incoming: readonly TaskDay[]): TaskDay[] {
+  const byDate = new Map<string, Map<string, TaskRecord>>();
+  for (const day of [...current, ...incoming]) {
+    const tasks = byDate.get(day.date) ?? new Map<string, TaskRecord>();
+    for (const task of day.tasks) tasks.set(task.id, task);
+    byDate.set(day.date, tasks);
+  }
+  return [...byDate.entries()]
+    .sort(([left], [right]) => right.localeCompare(left))
+    .map(([date, tasks]) => ({ date, tasks: sortTasksNewestFirst([...tasks.values()]) }));
 }
 
 function ItemStateIcon({ state }: { state: TaskState }) {
@@ -185,15 +202,65 @@ function TaskCard({ task }: { task: TaskRecord }) {
   );
 }
 
+function ActivityCard({ record }: { record: FeedbackRecord }) {
+  const { t } = useTranslation();
+  const failed = record.finalState === 'failed';
+  const context = [record.context?.action, record.context?.resource, record.context?.form].filter(Boolean);
+  return (
+    <Paper
+      variant="outlined"
+      data-testid="activity-record"
+      sx={{ p: { xs: 1.25, sm: 1.5 }, borderLeft: 4, borderLeftColor: failed ? 'error.main' : 'success.main' }}
+    >
+      <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1 }}>
+        {failed
+          ? <HighlightOffIcon color="error" sx={{ fontSize: 20, mt: '1px' }} aria-hidden />
+          : record.severity === 'warning' || record.severity === 'info'
+            ? <InfoOutlinedIcon color={record.severity} sx={{ fontSize: 20, mt: '1px' }} aria-hidden />
+            : <CheckCircleIcon color="success" sx={{ fontSize: 20, mt: '1px' }} aria-hidden />}
+        <Box sx={{ minWidth: 0, flex: 1 }}>
+          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+            <Chip
+              size="small"
+              color={failed ? 'error' : record.severity === 'warning' ? 'warning' : record.severity === 'info' ? 'info' : 'success'}
+              variant="outlined"
+              label={t(failed ? 'feedbackStateFailed' : 'feedbackStateSucceeded')}
+            />
+            <Typography variant="body2" sx={{ fontWeight: 650, flex: 1 }}>{record.message}</Typography>
+          </Box>
+          {context.length ? (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, wordBreak: 'break-word' }}>
+              {context.join(' · ')}
+            </Typography>
+          ) : null}
+          <Box sx={{ display: 'flex', gap: 1, mt: 0.5, flexWrap: 'wrap' }}>
+            <Typography variant="caption" color="text.disabled" component="time" dateTime={record.createdAt}>
+              {formatTimestamp(record.createdAt)}
+            </Typography>
+            {record.code ? <Typography variant="caption" color="text.disabled" sx={MONO}>{record.code}</Typography> : null}
+          </Box>
+        </Box>
+      </Box>
+    </Paper>
+  );
+}
+
 export function TasksPage({ onClose }: { onClose?: () => void }) {
   const { t } = useTranslation();
-  const [tasks, setTasks] = useState<TaskRecord[] | null>(null);
+  const { records } = useFeedback();
+  const [days, setDays] = useState<TaskDay[] | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inFlightRef = useRef(false);
   const mountedRef = useRef(false);
+  const historyInitializedRef = useRef(false);
+  const requestControllerRef = useRef<AbortController | null>(null);
+  const loadMoreTargetRef = useRef<HTMLDivElement | null>(null);
 
   const clearTimer = useCallback(() => {
     if (timerRef.current !== null) {
@@ -202,59 +269,101 @@ export function TasksPage({ onClose }: { onClose?: () => void }) {
     }
   }, []);
 
-  /** One poll cycle: fetch once, then schedule the next cycle from the fresh
-   *  state. Re-entrant safe — a second call while a request is in flight is
-   *  a no-op, so polling and manual refresh can never waterfall. */
-  const poll = useCallback(async () => {
+  /** Fetch only the newest three log days. Existing older pages remain in
+   * memory, while matching task ids are replaced by the freshest snapshots. */
+  const refreshLatest = useCallback(async () => {
     if (inFlightRef.current || !mountedRef.current) return;
     inFlightRef.current = true;
+    const controller = new AbortController();
+    requestControllerRef.current = controller;
     try {
-      const { tasks: next } = await api.listTasks();
+      const page = await api.listTasks({ limitDays: PAGE_SIZE_DAYS }, controller.signal);
       if (!mountedRef.current) return;
-      setTasks(next);
+      setDays((current) => mergeDays(current ?? [], page.days));
+      if (!historyInitializedRef.current) {
+        setNextCursor(page.nextCursor);
+        setHasMore(page.hasMore);
+        historyInitializedRef.current = true;
+      }
       setLoadFailed(false);
       setUpdatedAt(new Date().toISOString());
       clearTimer();
-      timerRef.current = setTimeout(() => void poll(), pollDelayMs(next, ACTIVE_POLL_MS, IDLE_POLL_MS));
+      if (page.days.some((day) => day.tasks.some(isTaskActive))) {
+        timerRef.current = setTimeout(() => void refreshLatest(), ACTIVE_POLL_MS);
+      }
     } catch {
       if (!mountedRef.current) return;
-      // Keep already-loaded tasks visible on a transient failure; the page
-      // falls back to the idle cadence and flags the stale snapshot.
+      // Keep already-loaded task days visible on a transient failure. Manual
+      // refresh remains available; failed active polls do not spin forever.
       setLoadFailed(true);
       clearTimer();
-      timerRef.current = setTimeout(() => void poll(), IDLE_POLL_MS);
     } finally {
+      if (requestControllerRef.current === controller) requestControllerRef.current = null;
       inFlightRef.current = false;
     }
   }, [clearTimer]);
 
   useEffect(() => {
     mountedRef.current = true;
-    void poll();
+    void refreshLatest();
     return () => {
       mountedRef.current = false;
+      requestControllerRef.current?.abort();
+      requestControllerRef.current = null;
       clearTimer();
     };
-  }, [poll, clearTimer]);
+  }, [refreshLatest, clearTimer]);
+
+  const loadMore = useCallback(async () => {
+    if (!mountedRef.current || inFlightRef.current || loadingMore || !hasMore || !nextCursor) return;
+    inFlightRef.current = true;
+    const controller = new AbortController();
+    requestControllerRef.current = controller;
+    setLoadingMore(true);
+    try {
+      const page = await api.listTasks({ before: nextCursor, limitDays: PAGE_SIZE_DAYS }, controller.signal);
+      if (!mountedRef.current) return;
+      setDays((current) => mergeDays(current ?? [], page.days));
+      setNextCursor(page.nextCursor);
+      setHasMore(page.hasMore);
+      setLoadFailed(false);
+    } catch {
+      if (mountedRef.current) setLoadFailed(true);
+    } finally {
+      if (requestControllerRef.current === controller) requestControllerRef.current = null;
+      inFlightRef.current = false;
+      if (mountedRef.current) setLoadingMore(false);
+    }
+  }, [hasMore, loadingMore, nextCursor]);
+
+  useEffect(() => {
+    const target = loadMoreTargetRef.current;
+    if (!target || !hasMore || !nextCursor) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) void loadMore();
+    }, { rootMargin: '160px 0px' });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [hasMore, loadMore, nextCursor]);
 
   const refresh = useCallback(async () => {
     clearTimer();
     setRefreshing(true);
     try {
-      await poll();
+      await refreshLatest();
     } finally {
       if (mountedRef.current) setRefreshing(false);
     }
-  }, [clearTimer, poll]);
+  }, [clearTimer, refreshLatest]);
 
-  const ordered = useMemo(() => sortTasksNewestFirst(tasks ?? []), [tasks]);
+  const ordered = useMemo(() => (days ?? []).flatMap((day) => day.tasks), [days]);
   const counts = useMemo(() => countTasksByState(ordered), [ordered]);
   const summaryStates: readonly TaskState[] = ['running', 'queued', 'failed', 'succeeded'];
 
   return (
     <Box>
       <PageHeader
-        title={t('tasks')}
+        title={t('feedbackCenter')}
         actions={
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
             <Button
@@ -273,9 +382,18 @@ export function TasksPage({ onClose }: { onClose?: () => void }) {
           </Box>
         }
       />
-      {tasks === null && loadFailed ? (
+      {records.length > 0 ? (
+        <Box sx={{ mb: 2.5 }}>
+          <Typography variant="subtitle2" sx={{ mb: 1 }}>{t('feedbackSessionActivity')}</Typography>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }} aria-live="polite">
+            {records.map((record) => <ActivityCard key={record.id} record={record} />)}
+          </Box>
+        </Box>
+      ) : null}
+      <Typography variant="subtitle2" sx={{ mb: 1 }}>{t('tasks')}</Typography>
+      {days === null && loadFailed ? (
         <ErrorState message={t('tasksLoadFailed')} onRetry={() => void refresh()} />
-      ) : tasks === null ? (
+      ) : days === null ? (
         <LoadingState label={t('tasksLoading')} />
       ) : ordered.length === 0 ? (
         <EmptyState title={t('tasksEmpty')} />
@@ -307,10 +425,21 @@ export function TasksPage({ onClose }: { onClose?: () => void }) {
               </Typography>
             ) : null}
           </Box>
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }} aria-live="polite">
-            {ordered.map((task) => (
-              <TaskCard key={task.id} task={task} />
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }} aria-live="polite">
+            {(days ?? []).map((day) => (
+              <Box component="section" key={day.date} aria-labelledby={`task-day-${day.date}`}>
+                <Typography id={`task-day-${day.date}`} component="h3" variant="subtitle1" sx={{ mb: 1, fontWeight: 700 }}>
+                  {formatLogDay(day.date)}
+                </Typography>
+                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+                  {day.tasks.map((task) => <TaskCard key={task.id} task={task} />)}
+                </Box>
+              </Box>
             ))}
+          </Box>
+          <Box ref={loadMoreTargetRef} data-testid="tasks-load-more-sentinel" sx={{ minHeight: 1, pt: 2, textAlign: 'center' }}>
+            {loadingMore ? <CircularProgress size={20} aria-label={t('tasksLoadingMore')} /> : null}
+            {!hasMore ? <Typography variant="caption" color="text.disabled">{t('tasksHistoryEnd')}</Typography> : null}
           </Box>
         </>
       )}

@@ -34,7 +34,7 @@ export function sampleColorAtCenter(pixels: ImageData, crop: PixelRect, windowSi
     for (let dx = -halfWindow; dx <= halfWindow; dx++) {
       const x = centerX + dx;
       const y = centerY + dy;
-      if (!isInBounds(pixels, x, y)) continue;
+      if (!isInBounds(pixels, x, y) || !isInRect(crop, x, y)) continue;
 
       const index = (y * pixels.width + x) * 4;
       if (pixels.data[index + 3] < TRANSPARENT_ALPHA) continue;
@@ -55,4 +55,8 @@ function isUsableRect(crop: PixelRect): boolean {
 
 function isInBounds(pixels: ImageData, x: number, y: number): boolean {
   return x >= 0 && x < pixels.width && y >= 0 && y < pixels.height;
+}
+
+function isInRect(rect: PixelRect, x: number, y: number): boolean {
+  return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
 }

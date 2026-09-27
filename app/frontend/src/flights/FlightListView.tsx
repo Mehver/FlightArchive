@@ -6,12 +6,10 @@
  *  smooth colour transitions. Fixed record information and the route preview
  *  stay in separate, single-line groups for reliable banner alignment. */
 
-import { Box, IconButton, Paper, Tooltip, Typography } from '@mui/material';
+import { Box, Paper, Tooltip, Typography } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import ConfirmationNumberOutlinedIcon from '@mui/icons-material/ConfirmationNumberOutlined';
-import DeleteIcon from '@mui/icons-material/Delete';
-import EditIcon from '@mui/icons-material/Edit';
 import { displayFlightNumber } from '../utils/format';
 import { useTranslation } from '../i18n';
 import { BoardingPassFrame } from '../boardingpass/BoardingPassFrame';
@@ -42,7 +40,7 @@ export function displayListFlightNumber(airlineCode: string, flightNumber: strin
   return match ? `${match[1]}${match[2].padStart(4, '0')}` : displayed;
 }
 
-export function FlightListView({ flights, airlineNames, airlines, onOpen, onEdit, onDelete, openLabel }: FlightViewProps) {
+export function FlightListView({ flights, airlineNames, airlines, onOpen, openLabel }: FlightViewProps) {
   const { t } = useTranslation();
   const muiTheme = useTheme();
   const labelFor = openLabel ?? ((flightNumber: string) => t('openFlightDetails', { flightNumber }));
@@ -187,34 +185,6 @@ export function FlightListView({ flights, airlineNames, airlines, onOpen, onEdit
                 flex: '0 0 auto',
               }}
             >
-              {onEdit ? (
-                <Tooltip title={t('edit')}>
-                  <IconButton
-                    size="small"
-                    aria-label={t('editFlight', { flightNumber })}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onEdit(flight);
-                    }}
-                  >
-                    <EditIcon fontSize="small" />
-                  </IconButton>
-                </Tooltip>
-              ) : null}
-              {onDelete ? (
-                <Tooltip title={t('delete')}>
-                  <IconButton
-                    size="small"
-                    aria-label={t('deleteFlight', { flightNumber })}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onDelete(flight);
-                    }}
-                  >
-                    <DeleteIcon fontSize="small" />
-                  </IconButton>
-                </Tooltip>
-              ) : null}
                 <ChevronRightIcon sx={{ color: 'text.disabled' }} aria-hidden />
               </Box>
             </Box>

@@ -92,4 +92,15 @@ describe('placementBox', () => {
       ),
     ).toBeNull();
   });
+
+  it('bounds presentation geometry for an extremely narrow crop', () => {
+    const box = placementBox(
+      layout({ crop: { centerX: 0, centerY: 0, width: Number.MIN_VALUE, height: 100, rotationDegrees: 0 } }),
+      TEMPLATE,
+    );
+    expect(box).not.toBeNull();
+    expect(box!.widthPct).toBeLessThanOrEqual(2_000);
+    expect(box!.heightPct).toBeLessThanOrEqual(2_000);
+    expect(Object.values(box!).every(Number.isFinite)).toBe(true);
+  });
 });

@@ -110,12 +110,6 @@ describe('FlightDetailDialog unknown catalog codes', () => {
     expect(screen.getAllByTestId('route-connector')).toHaveLength(1);
   });
 
-  it('presents a status-free flight without a retired status badge', () => {
-    renderDetail();
-    expect(screen.queryByText('Completed')).toBeNull();
-    expect(screen.queryByText('已完成')).toBeNull();
-  });
-
   it('shows the stored codes verbatim alongside the bilingual unlisted note', () => {
     renderDetail();
     // Codes themselves are never replaced…

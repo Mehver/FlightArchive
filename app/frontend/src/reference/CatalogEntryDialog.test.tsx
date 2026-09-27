@@ -7,9 +7,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { LanguageProvider } from '../i18n';
 import { AppStateProvider } from '../state/AppState';
-import { CatalogEntryDialog, isCatalogEntryFormValid } from './CatalogEntryDialog';
+import { CatalogEntryDialog, catalogEntryPayloadKey, isCatalogEntryFormValid } from './CatalogEntryDialog';
 
 afterEach(cleanup);
+
+it('derives the keyed PUT identity from a normalized catalog form', () => {
+  expect(catalogEntryPayloadKey('airlines', { code: ' zz ' })).toBe('ZZ');
+  expect(catalogEntryPayloadKey('aircraft-types', { icao: ' a3b ' })).toBe('A3B');
+});
 
 function renderDialog(onSave = vi.fn()) {
   render(<LanguageProvider><AppStateProvider><CatalogEntryDialog kind="airlines" open initial={null} saving={false} allianceSuggestions={['oneworld', 'SkyTeam', 'Star Alliance']} manufacturerSuggestions={[]} onSave={onSave} onClose={vi.fn()} /></AppStateProvider></LanguageProvider>);

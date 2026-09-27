@@ -19,6 +19,7 @@ export function ConfirmDialog({
   message,
   confirmLabel,
   danger = false,
+  busy = false,
   onConfirm,
   onClose,
 }: {
@@ -27,19 +28,20 @@ export function ConfirmDialog({
   message: string;
   confirmLabel?: string;
   danger?: boolean;
+  busy?: boolean;
   onConfirm: () => void;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
   return (
-    <Dialog open={open} onClose={onClose} aria-labelledby="confirm-dialog-title" maxWidth="xs" fullWidth>
+    <Dialog open={open} onClose={() => { if (!busy) onClose(); }} aria-labelledby="confirm-dialog-title" maxWidth="xs" fullWidth>
       <DialogTitle id="confirm-dialog-title">{title}</DialogTitle>
       <DialogContent>
         <DialogContentText>{message}</DialogContentText>
       </DialogContent>
       <DialogActions>
-        <Button onClick={onClose}>{t('cancel')}</Button>
-        <Button onClick={onConfirm} color={danger ? 'error' : 'primary'} variant="contained" autoFocus>
+        <Button onClick={onClose} disabled={busy}>{t('cancel')}</Button>
+        <Button onClick={onConfirm} disabled={busy} color={danger ? 'error' : 'primary'} variant="contained" autoFocus>
            {confirmLabel ?? t('confirm')}
         </Button>
       </DialogActions>

@@ -1,7 +1,7 @@
 {
   "name": "flight-archive-frontend",
   "private": true,
-  "version": "1.0.0",
+  "version": "0.0.0-private",
   "license": "BSD-3-Clause",
   "packageManager": "pnpm@11.17.0",
   "engines": {
@@ -13,8 +13,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest",
-    "screenshot": "node scripts/screenshot.mjs"
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",
@@ -33,7 +32,6 @@
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.0.5",
     "jsdom": "^30.0.1",
-    "playwright": "^1.53.0",
     "typescript": "~5.9.2",
     "vite": "^8.2.0",
     "vitest": "^4.1.11"

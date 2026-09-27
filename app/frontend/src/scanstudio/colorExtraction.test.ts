@@ -25,4 +25,10 @@ describe('sampleColorAtCenter', () => {
     expect(sampleColorAtCenter(pixels, { x: 0, y: 0, width: 5, height: 5 }, 1)).toEqual({ r: 100, g: 110, b: 120 });
     expect(sampleColorAtCenter(pixels, { x: 0, y: 0, width: 5, height: 5 }, 5)).toEqual({ r: 14, g: 24, b: 34 });
   });
+
+  test('does not include pixels outside a small crop', () => {
+    const pixels = imageData(7, 7, [200, 10, 10, 255]);
+    setPixel(pixels, 3, 3, [10, 20, 30, 255]);
+    expect(sampleColorAtCenter(pixels, { x: 3, y: 3, width: 1, height: 1 }, 5)).toEqual({ r: 10, g: 20, b: 30 });
+  });
 });

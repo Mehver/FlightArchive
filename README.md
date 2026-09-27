@@ -74,6 +74,12 @@ Run the following container commands from the repository root.
 docker build -f app/Dockerfile -t flightarchive:local app
 ```
 
+The frontend stage downloads `pnpm` and packages from the npm registry. Behind a mirror or a restricted network, point it at a reachable registry:
+
+```shell
+docker build -f app/Dockerfile --build-arg NPM_REGISTRY=https://registry.npmmirror.com -t flightarchive:local app
+```
+
 **Run Docker Image:**
 
 ```shell
@@ -103,6 +109,8 @@ Release assets also include separately loadable `linux/amd64` and `linux/arm64` 
 | `-v /path/for/cache:/cache` | Optional rebuildable thumbnail cache |
 
 Open http://localhost:8080 after the container starts. Without the optional cache mount, `/cache` remains an ordinary disposable container directory.
+
+The Activity & Tasks drawer combines session-only operation feedback with background-task history grouped by log date; activity is not persisted across reloads. Task history is loaded only while the drawer is open, starts with the newest three existing log dates, loads older dates while scrolling, and polls only while an active task needs a fresh latest-page snapshot.
 
 ---
 

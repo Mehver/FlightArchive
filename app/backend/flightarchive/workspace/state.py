@@ -6,23 +6,25 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import shutil
+from datetime import datetime, timezone
 from typing import Any
 
 from ..domain.store import DomainStore
 from ..business_data import BUSINESS_DATA_SCHEMA_VERSION, BusinessDataError, BusinessDataPersistence, make_business_data
 
 
+logger = logging.getLogger(__name__)
+
+
 class Workspace:
     def __init__(self, *, seed: bool = True) -> None:
         self.domain = DomainStore()
-        self.domain.on_change = self.touch_business
         self.lock = asyncio.Lock()
         self.business_persistence: BusinessDataPersistence | None = None
         if seed:
             self.domain.seed_defaults()
-
-    def touch_business(self) -> None:
-        pass
 
     def configure_business_persistence(self, persistence: BusinessDataPersistence) -> bool:
         """Load local business data before initial seeding; invalid files stay safe."""
@@ -30,7 +32,24 @@ class Workspace:
         data = persistence.load()
         if data is None:
             return False
-        self.domain.load_dict(data)
+        issues = self.domain.load_dict(data)
+        if issues:
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+            backup = persistence.path.with_name(f"business-data.corrupt-{timestamp}.json")
+            try:
+                shutil.copy2(persistence.path, backup)
+            except OSError:
+                logger.warning(
+                    "business data contained invalid entries and could not be backed up: %s",
+                    "; ".join(issues),
+                    exc_info=True,
+                )
+            else:
+                logger.warning(
+                    "business data contained invalid entries; original copied to %s: %s",
+                    backup,
+                    "; ".join(issues),
+                )
         return True
 
     def business_data(self) -> dict[str, Any]:
@@ -55,8 +74,8 @@ class Workspace:
             self.persist_business_data()
             return result
         except Exception as exc:
-            # Restore via the established deserializers, then undo their touch
-            # callbacks so a failed operation has no observable data revision.
+            # Restore via the established deserializers so the failed operation
+            # leaves no observable domain mutation.
             self.domain.load_dict(domain_before)
             if not isinstance(exc, BusinessDataError):
                 (
@@ -70,7 +89,7 @@ class Workspace:
         assert self.business_persistence is not None
         persistence = self.business_persistence
         return {
-            "mode": persistence.mode,
+            "mode": "local",
             "schemaVersion": BUSINESS_DATA_SCHEMA_VERSION,
             "writable": persistence.writable,
             "loaded": persistence.loaded,
@@ -80,7 +99,6 @@ class Workspace:
     def reset(self) -> None:
         """Discard all in-memory state and reseed defaults."""
         self.domain = DomainStore()
-        self.domain.on_change = self.touch_business
         self.domain.seed_defaults()
 
     # ------------------------------------------------------------------

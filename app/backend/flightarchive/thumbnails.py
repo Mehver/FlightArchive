@@ -78,6 +78,14 @@ class Thumbnail:
     height: int
 
 
+@dataclass
+class _KeyedLock:
+    """A path lock retained until its holder and every registered waiter leave."""
+
+    lock: threading.Lock
+    users: int = 0
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS thumbnail_objects (
     id TEXT PRIMARY KEY,
@@ -292,7 +300,8 @@ class ThumbnailStore:
         database = self.root / DATABASE_PATH
         database.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._path_locks: dict[str, threading.Lock] = {}
+        self._closed = False
+        self._path_locks: dict[str, _KeyedLock] = {}
         self._db = sqlite3.connect(database, check_same_thread=False, isolation_level=None)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA foreign_keys=ON")
@@ -319,7 +328,10 @@ class ThumbnailStore:
 
     def close(self) -> None:
         with self._lock:
+            if self._closed:
+                return
             self._db.close()
+            self._closed = True
 
     @contextlib.contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -336,6 +348,24 @@ class ThumbnailStore:
             raise
         else:
             self._db.execute("COMMIT")
+
+    @contextlib.contextmanager
+    def _path_lock(self, virtual_path: str) -> Iterator[None]:
+        """Serialize one cache key without replacing a lock under its waiters."""
+        with self._lock:
+            entry = self._path_locks.get(virtual_path)
+            if entry is None:
+                entry = _KeyedLock(threading.Lock())
+                self._path_locks[virtual_path] = entry
+            entry.users += 1
+        try:
+            with entry.lock:
+                yield
+        finally:
+            with self._lock:
+                entry.users -= 1
+                if entry.users == 0 and self._path_locks.get(virtual_path) is entry:
+                    del self._path_locks[virtual_path]
 
     def lookup(self, virtual_path: str, local_path: str, source_etag: str) -> Thumbnail | None:
         """Return the cached thumbnail while its source and profile binding still match."""
@@ -355,40 +385,32 @@ class ThumbnailStore:
             hit = self._lookup_locked(virtual_path, local_path, source_etag)
             if hit is not None:
                 return hit
-            path_lock = self._path_locks.setdefault(virtual_path, threading.Lock())
-        with path_lock:
-            try:
-                with self._lock:
-                    hit = self._lookup_locked(virtual_path, local_path, source_etag)
-                    if hit is not None:
-                        return hit
-                data, width, height = render_webp(
-                    source, max_dimension=self.max_dimension, quality=self.quality,
-                    max_source_pixels=self.max_source_pixels,
+        with self._path_lock(virtual_path):
+            with self._lock:
+                hit = self._lookup_locked(virtual_path, local_path, source_etag)
+                if hit is not None:
+                    return hit
+            data, width, height = render_webp(
+                source, max_dimension=self.max_dimension, quality=self.quality,
+                max_source_pixels=self.max_source_pixels,
+            )
+            object_id = hashlib.sha256(data).hexdigest()
+            source_sha256 = hashlib.sha256(source).hexdigest()
+            with self._lock, self._transaction():
+                self._delete_binding_locked(virtual_path)
+                self._db.execute(
+                    "INSERT OR IGNORE INTO thumbnail_objects"
+                    " (id, data, width, height, source_sha256, source_bytes, profile, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (object_id, data, width, height, source_sha256, len(source), self.profile, time.time()),
                 )
-                object_id = hashlib.sha256(data).hexdigest()
-                source_sha256 = hashlib.sha256(source).hexdigest()
-                with self._lock, self._transaction():
-                    self._delete_binding_locked(virtual_path)
-                    self._db.execute(
-                        "INSERT OR IGNORE INTO thumbnail_objects"
-                        " (id, data, width, height, source_sha256, source_bytes, profile, created_at)"
-                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (object_id, data, width, height, source_sha256, len(source), self.profile, time.time()),
-                    )
-                    self._db.execute(
-                        "INSERT INTO thumbnail_bindings"
-                        " (virtual_path, local_path, source_etag, thumbnail_id, profile, created_at)"
-                        " VALUES (?, ?, ?, ?, ?, ?)",
-                        (virtual_path, local_path, source_etag, object_id, self.profile, time.time()),
-                    )
-                return Thumbnail(id=object_id, data=data, width=width, height=height)
-            finally:
-                # Keep the per-path lock table bounded; the double-checked
-                # lookup above makes eviction safe against late waiters.
-                with self._lock:
-                    if self._path_locks.get(virtual_path) is path_lock:
-                        del self._path_locks[virtual_path]
+                self._db.execute(
+                    "INSERT INTO thumbnail_bindings"
+                    " (virtual_path, local_path, source_etag, thumbnail_id, profile, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (virtual_path, local_path, source_etag, object_id, self.profile, time.time()),
+                )
+            return Thumbnail(id=object_id, data=data, width=width, height=height)
 
     def get_or_create_rectangular_crop(self, virtual_path: str, local_path: str, source_etag: str, source: bytes,
                                        geometry: tuple[float, float, float, float, float]) -> Thumbnail:
@@ -403,37 +425,31 @@ class ThumbnailStore:
             hit = self._lookup_locked(virtual_path, local_path, source_etag)
             if hit is not None:
                 return hit
-            path_lock = self._path_locks.setdefault(virtual_path, threading.Lock())
-        with path_lock:
-            try:
-                with self._lock:
-                    hit = self._lookup_locked(virtual_path, local_path, source_etag)
-                    if hit is not None:
-                        return hit
-                data, width, height = render_rectangular_crop_webp(
-                    source, geometry, max_dimension=self.max_dimension, quality=self.quality,
-                    max_source_pixels=self.max_source_pixels,
+        with self._path_lock(virtual_path):
+            with self._lock:
+                hit = self._lookup_locked(virtual_path, local_path, source_etag)
+                if hit is not None:
+                    return hit
+            data, width, height = render_rectangular_crop_webp(
+                source, geometry, max_dimension=self.max_dimension, quality=self.quality,
+                max_source_pixels=self.max_source_pixels,
+            )
+            object_id = hashlib.sha256(data).hexdigest()
+            with self._lock, self._transaction():
+                self._delete_binding_locked(virtual_path)
+                self._db.execute(
+                    "INSERT OR IGNORE INTO thumbnail_objects"
+                    " (id, data, width, height, source_sha256, source_bytes, profile, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (object_id, data, width, height, hashlib.sha256(source).hexdigest(), len(source), self.profile, time.time()),
                 )
-                object_id = hashlib.sha256(data).hexdigest()
-                with self._lock, self._transaction():
-                    self._delete_binding_locked(virtual_path)
-                    self._db.execute(
-                        "INSERT OR IGNORE INTO thumbnail_objects"
-                        " (id, data, width, height, source_sha256, source_bytes, profile, created_at)"
-                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (object_id, data, width, height, hashlib.sha256(source).hexdigest(), len(source), self.profile, time.time()),
-                    )
-                    self._db.execute(
-                        "INSERT INTO thumbnail_bindings"
-                        " (virtual_path, local_path, source_etag, thumbnail_id, profile, created_at)"
-                        " VALUES (?, ?, ?, ?, ?, ?)",
-                        (virtual_path, local_path, source_etag, object_id, self.profile, time.time()),
-                    )
-                return Thumbnail(id=object_id, data=data, width=width, height=height)
-            finally:
-                with self._lock:
-                    if self._path_locks.get(virtual_path) is path_lock:
-                        del self._path_locks[virtual_path]
+                self._db.execute(
+                    "INSERT INTO thumbnail_bindings"
+                    " (virtual_path, local_path, source_etag, thumbnail_id, profile, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (virtual_path, local_path, source_etag, object_id, self.profile, time.time()),
+                )
+            return Thumbnail(id=object_id, data=data, width=width, height=height)
 
     def rebind(self, from_virtual_path: str, to_virtual_path: str, source_etag: str) -> bool:
         """Move the binding at *from_virtual_path* to *to_virtual_path*.

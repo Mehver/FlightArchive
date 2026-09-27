@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 import { createTheme } from '@mui/material/styles';
-import type { HexColor } from './api/types';
+import type { HexColor } from '../api/types';
 
 declare module '@mui/material/styles' {
   interface Palette {

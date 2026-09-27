@@ -9,7 +9,7 @@ the workspace persists a successful mutation atomically.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable
 
 from .models import (
     AircraftType,
@@ -35,6 +35,27 @@ class ConflictError(Exception):
     """Raised when an operation conflicts with existing data."""
 
 
+def merge_flight_submission(existing: dict[str, Any], changes: dict[str, Any]) -> dict[str, Any]:
+    """Merge an update and discard layouts whose exact resource changed."""
+    merged = dict(existing)
+    for key, value in changes.items():
+        if key in merged and key not in ("id", "createdAt"):
+            merged[key] = value
+    paper_layouts = merged.get("paperBoardingPassLayouts")
+    if isinstance(paper_layouts, dict):
+        paper_layouts = dict(paper_layouts)
+        merged["paperBoardingPassLayouts"] = paper_layouts
+        for slot, asset_field in (
+            ("paperBoardingPassFront", "paperBoardingPassFrontResourcePath"),
+            ("paperBoardingPassBack", "paperBoardingPassBackResourcePath"),
+        ):
+            if existing[asset_field] != merged.get(asset_field):
+                paper_layouts.pop(slot, None)
+    if existing.get("electronicBoardingPassResourcePath") != merged.get("electronicBoardingPassResourcePath"):
+        merged["electronicBoardingPass"] = None
+    return merged
+
+
 class DomainStore:
     def __init__(self) -> None:
         self.airlines: dict[str, Airline] = {}
@@ -42,15 +63,6 @@ class DomainStore:
         self.aircraft_types: dict[str, AircraftType] = {}
         self.flights: dict[str, FlightRecord] = {}
         self.settings: dict[str, str] = {}
-        self.on_change: Callable[[], None] | None = None
-
-    # ------------------------------------------------------------------
-    # internal helpers
-    # ------------------------------------------------------------------
-
-    def _changed(self) -> None:
-        if self.on_change is not None:
-            self.on_change()
 
     # ------------------------------------------------------------------
     # seeding / (de)serialization
@@ -177,7 +189,6 @@ class DomainStore:
         self.aircraft_types = aircraft_types
         self.flights = flights
         self.settings = settings
-        self._changed()
         return issues
 
     # ------------------------------------------------------------------
@@ -244,7 +255,6 @@ class DomainStore:
         record.createdAt = now
         record.updatedAt = now
         self.flights[record.id] = record
-        self._changed()
         return record
 
     def update_flight(self, flight_id: str, data: dict[str, Any]) -> FlightRecord:
@@ -252,18 +262,7 @@ class DomainStore:
         if resource_issues:
             raise ValidationError(resource_issues)
         existing = self.get_flight(flight_id)
-        merged = existing.to_dict()
-        for key, value in data.items():
-            if key in merged and key not in ("id", "createdAt"):
-                merged[key] = value
-        # A crop/layout belongs to the exact selected RFG virtual resource.
-        paper_layouts = merged.get("paperBoardingPassLayouts", {})
-        if isinstance(paper_layouts, dict):
-            for slot, asset_field in (("paperBoardingPassFront", "paperBoardingPassFrontResourcePath"), ("paperBoardingPassBack", "paperBoardingPassBackResourcePath")):
-                if existing.to_dict()[asset_field] != merged.get(asset_field):
-                    paper_layouts.pop(slot, None)
-        if existing.electronicBoardingPassResourcePath != merged.get("electronicBoardingPassResourcePath"):
-            merged["electronicBoardingPass"] = None
+        merged = merge_flight_submission(existing.to_dict(), data)
         layout_issues = validate_paper_boarding_pass_layouts(merged.get("paperBoardingPassLayouts", {}), merged)
         layout_issues.extend(validate_electronic_boarding_pass(merged.get("electronicBoardingPass"), merged))
         if layout_issues:
@@ -276,13 +275,11 @@ class DomainStore:
             raise ValidationError(issues)
         record.updatedAt = utc_now_iso()
         self.flights[record.id] = record
-        self._changed()
         return record
 
     def delete_flight(self, flight_id: str) -> None:
         self.get_flight(flight_id)
         del self.flights[flight_id]
-        self._changed()
 
     # ------------------------------------------------------------------
     # catalogs
@@ -333,23 +330,7 @@ class DomainStore:
             raise ValidationError(issues)
         key = self.catalog_key(kind, entry.to_dict())
         self.catalog_table(kind)[key] = entry
-        self._changed()
         return entry
-
-    def delete_catalog_entry(self, kind: str, key: str, *, force: bool = False) -> None:
-        table = self.catalog_table(kind)
-        key = key.strip().upper()
-        if key not in table:
-            raise NotFoundError(f"{kind} entry {key!r} not found")
-        if not force:
-            refs = self._catalog_references(kind, key)
-            if refs:
-                raise ConflictError(
-                    f"{kind} entry {key!r} is referenced by {refs} flight(s); "
-                    "pass force=true to delete anyway"
-                )
-        del table[key]
-        self._changed()
 
     def delete_catalog_entries(self, kind: str, keys: list[str], *, force: bool = False) -> list[str]:
         """Delete catalog entries as one all-or-nothing domain operation.
@@ -375,7 +356,6 @@ class DomainStore:
                 )
         for key in normalized_keys:
             del table[key]
-        self._changed()
         return normalized_keys
 
     def _catalog_references(self, kind: str, key: str) -> int:

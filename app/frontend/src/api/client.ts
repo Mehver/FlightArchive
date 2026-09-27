@@ -5,20 +5,23 @@
 
 import type {
   Catalogs,
+  CatalogDeleteRequest,
+  CatalogDeleteResponse,
   FlightRecord,
   ResourceFingerprintsRequest,
   ResourceFingerprintsResponse,
+  ResourceReviewSnapshot,
   ResourceIgnoreRequest,
   ResourceIgnoreResponse,
-  ResourceBatchRematchesRequest,
-  ResourceBatchRematchesResponse,
-  ResourceLocalFile,
-  ResourceRematchesRequest,
-  ResourceRematchesResponse,
+  ResourceRematchRequest,
+  ResourceRematchResponse,
   ResourceReleaseRequest,
   ResourceReleaseResponse,
-  TaskRecord,
-  WorkspaceStatus,
+  ResourceUnignoreRequest,
+  ResourceUnignoreResponse,
+  ListTasksParams,
+  TasksPageResponse,
+  StatusResponse,
 } from './types';
 
 export class ApiError extends Error {
@@ -67,10 +70,6 @@ function jsonInit(method: string, body?: unknown): RequestInit {
   };
 }
 
-async function businessMutation<T>(operation: Promise<T>): Promise<T> {
-  return operation;
-}
-
 /** URL of the server-rendered upright rectangular WebP preview for a prepared
  * paper boarding-pass slot (GET /api/flights/{flightId}/boarding-passes/{slot}/preview).
  * Electronic-pass presentation has no endpoint preview. Both path parameters
@@ -84,56 +83,53 @@ export function boardingPassPreviewUrl(
 
 export const api = {
   // ---- workspace ----
-  status: (signal?: AbortSignal) => request<{ status: WorkspaceStatus; app: string; version: string }>('/workspace/status', { signal }),
+  status: (signal?: AbortSignal) => request<StatusResponse>('/status', { signal }),
 
   // ---- flights ----
-  listFlights: (params: Record<string, string> = {}) => {
+  listFlights: (params: Record<string, string> = {}, signal?: AbortSignal) => {
     const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v)).toString();
-    return request<{ flights: FlightRecord[] }>(`/flights${qs ? `?${qs}` : ''}`);
+    return request<{ flights: FlightRecord[] }>(`/flights${qs ? `?${qs}` : ''}`, signal ? { signal } : undefined);
   },
-  createFlight: (flight: Partial<FlightRecord>) => businessMutation(request<{ flight: FlightRecord }>('/flights', jsonInit('POST', flight))),
+  createFlight: (flight: Partial<FlightRecord>) => request<{ flight: FlightRecord }>('/flights', jsonInit('POST', flight)),
   updateFlight: (id: string, flight: Partial<FlightRecord>) =>
-    businessMutation(request<{ flight: FlightRecord }>(`/flights/${encodeURIComponent(id)}`, jsonInit('PUT', flight))),
-  deleteFlight: (id: string) => businessMutation(request<{ deleted: string }>(`/flights/${encodeURIComponent(id)}`, jsonInit('DELETE'))),
+    request<{ flight: FlightRecord }>(`/flights/${encodeURIComponent(id)}`, jsonInit('PUT', flight)),
+  deleteFlight: (id: string) => request<{ deleted: string }>(`/flights/${encodeURIComponent(id)}`, jsonInit('DELETE')),
 
   // ---- catalogs ----
-  getCatalogs: () => request<Catalogs>('/catalogs'),
-  createCatalogEntry: (kind: string, entry: unknown) =>
-    businessMutation(request<{ entry: unknown }>(`/catalogs/${kind}`, jsonInit('POST', entry))),
-  updateCatalogEntry: (kind: string, key: string, entry: unknown) =>
-    businessMutation(request<{ entry: unknown }>(`/catalogs/${kind}/${encodeURIComponent(key)}`, jsonInit('PUT', entry))),
-  deleteCatalogEntry: (kind: string, key: string, force = false) =>
-    businessMutation(request<{ deleted: string }>(
-      `/catalogs/${kind}/${encodeURIComponent(key)}${force ? '?force=true' : ''}`,
-      jsonInit('DELETE'),
-    )),
-  // Batch deletion is all-or-nothing on the server: a non-forced request
-  // that hits referenced entries fails with the standard 409 and deletes
-  // nothing, exactly like the single-key route.
-  deleteCatalogEntries: (kind: string, keys: string[], force = false) =>
-    businessMutation(request<{ deleted: string[] }>(`/catalogs/${kind}`, jsonInit('DELETE', { keys, force }))),
-
-  // ---- RFG resources ----
-  syncResources: () => request<{ cataloged: number; added: number }>('/resources/sync', jsonInit('POST', {})),
+  getCatalogs: (signal?: AbortSignal) => request<Catalogs>('/catalogs', signal ? { signal } : undefined),
+  putCatalogEntry: (kind: string, key: string, entry: unknown) =>
+    request<{ entry: unknown }>(`/catalogs/${kind}/${encodeURIComponent(key)}`, jsonInit('PUT', entry)),
+  // This is the sole deletion command, including one-key deletion. The server
+  // preflights the complete array, so conflicts and unknown keys delete nothing.
+  deleteCatalogEntries: (kind: string, keys: string[], force = false) => {
+    const payload: CatalogDeleteRequest = { keys, force };
+    return request<CatalogDeleteResponse>(`/catalogs/${kind}/delete`, jsonInit('POST', payload));
+  },
 
   // ---- RFG resource mappings ----
-  getResourceCatalog: () => request<{ localFiles: ResourceLocalFile[] }>('/resources/catalog'),
-  createResourceRematches: (payload: ResourceRematchesRequest) =>
-    businessMutation(request<ResourceRematchesResponse>('/resources/rematches', jsonInit('POST', payload))),
+  getResourceReview: (signal?: AbortSignal) => request<ResourceReviewSnapshot>('/resources/review', signal ? { signal } : undefined),
+  reconcileResources: (signal?: AbortSignal) => request<ResourceReviewSnapshot>('/resources/reconcile', { ...jsonInit('POST'), signal }),
   ignoreResource: (payload: ResourceIgnoreRequest) =>
-    businessMutation(request<ResourceIgnoreResponse>('/resources/ignore', jsonInit('POST', payload))),
-  createResourceBatchRematches: (payload: ResourceBatchRematchesRequest) =>
-    businessMutation(request<ResourceBatchRematchesResponse>('/resources/batch-rematches', jsonInit('POST', payload))),
+    request<ResourceIgnoreResponse>('/resources/ignore', jsonInit('POST', payload)),
+  unignoreResources: (payload: ResourceUnignoreRequest) =>
+    request<ResourceUnignoreResponse>('/resources/unignore', jsonInit('POST', payload)),
+  rematchResources: (payload: ResourceRematchRequest) =>
+    request<ResourceRematchResponse>('/resources/rematch', jsonInit('POST', payload)),
   // Release is a mapping mutation: it returns eligible object mappings to inbox.
   releaseResources: (payload: ResourceReleaseRequest) =>
-    businessMutation(request<ResourceReleaseResponse>('/resources/release', jsonInit('POST', payload))),
-  // Server-authorized fingerprints for persisted business-bound object resources.
-  // The mapping ETag must be forwarded; a 409 means the reviewed mapping is
-  // stale and the view has to be reloaded before retrying.
+    request<ResourceReleaseResponse>('/resources/release', jsonInit('POST', payload)),
+  // Validates then enqueues server-authorized fingerprints (202). The mapping
+  // ETag must be forwarded; a 409 means the reviewed mapping is stale.
   calculateResourceFingerprints: (payload: ResourceFingerprintsRequest) =>
-    businessMutation(request<ResourceFingerprintsResponse>('/resources/fingerprints', jsonInit('POST', payload))),
+    request<ResourceFingerprintsResponse>('/resources/fingerprints', jsonInit('POST', payload)),
 
   // ---- background tasks (read-only status) ----
-  listTasks: () => request<{ tasks: TaskRecord[] }>('/tasks'),
+  listTasks: (params: ListTasksParams = {}, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    if (params.before) query.set('before', params.before);
+    if (params.limitDays !== undefined) query.set('limitDays', String(params.limitDays));
+    const qs = query.toString();
+    return request<TasksPageResponse>(`/tasks${qs ? `?${qs}` : ''}`, signal ? { signal } : undefined);
+  },
 
 };

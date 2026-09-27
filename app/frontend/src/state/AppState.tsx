@@ -3,7 +3,7 @@
 
 /**
  * Shared application state: status heartbeat, explicitly refreshed catalogs,
- * and notifications. The heartbeat observes reachability only; mutation
+ * and the compatibility surface for feedback. The heartbeat observes reachability only; mutation
  * responses are authoritative and their callers refresh relevant data after
  * success. Business data is never periodically synchronized.
  */
@@ -17,61 +17,27 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { Alert, Snackbar } from '@mui/material';
-import { api, ApiError } from '../api/client';
-import type { Catalogs, WorkspaceStatus } from '../api/types';
-import { useTranslation } from '../i18n';
+import { api } from '../api/client';
+import type { Catalogs } from '../api/types';
 import { useWorkspaceHeartbeat, type ConnectivityState } from './useWorkspaceHeartbeat';
-
-export type NotifySeverity = 'success' | 'info' | 'warning' | 'error';
+import { FeedbackProvider, useFeedback, type FeedbackContext, type FeedbackSeverity } from '../feedback/FeedbackCenter';
 
 interface AppStateValue {
-  status: WorkspaceStatus | null;
-  statusError: string | null;
   connectivity: ConnectivityState;
   recheckConnection: () => Promise<void>;
   catalogs: Catalogs | null;
-  refreshStatus: () => Promise<void>;
   refreshCatalogs: () => Promise<void>;
   refreshAll: () => Promise<void>;
-  notify: (message: string, severity?: NotifySeverity) => void;
-  showError: (error: unknown, fallback?: string) => void;
+  notify: (message: string, severity?: FeedbackSeverity, context?: FeedbackContext) => void;
+  showError: (error: unknown, fallback?: string, context?: FeedbackContext) => void;
 }
 
 const AppStateContext = createContext<AppStateValue | null>(null);
 
-export function AppStateProvider({ children }: { children: ReactNode }) {
-  const { t } = useTranslation();
+function AppStateProviderInner({ children }: { children: ReactNode }) {
   const [catalogs, setCatalogs] = useState<Catalogs | null>(null);
-  const [snackbar, setSnackbar] = useState<{ message: string; severity: NotifySeverity } | null>(null);
-
-  const notify = useCallback((message: string, severity: NotifySeverity = 'success') => {
-    setSnackbar({ message, severity });
-  }, []);
-  const { status, connectivity, recheck: recheckConnection } = useWorkspaceHeartbeat(api.status);
-  const statusError = connectivity === 'offline' ? t('backendUnreachable') : null;
-
-  const showError = useCallback(
-      (error: unknown, fallback?: string) => {
-       const localizedFallback = fallback ?? t('operationFailed');
-       if (error instanceof ApiError) {
-          const message = error.code === 'network'
-            ? t('apiNetworkUnavailable')
-            : error.httpStatus > 0
-              ? `${localizedFallback} (${t('apiRequestFailed', { status: error.httpStatus })})`
-              : localizedFallback;
-         const detail = Array.isArray(error.details) ? t('apiDetails', { count: error.details.length }) : '';
-         notify(`${message}${detail}`, 'error');
-      } else if (error instanceof Error) {
-        notify(localizedFallback, 'error');
-      } else {
-        notify(localizedFallback, 'error');
-      }
-    },
-    [notify, t],
-  );
-
-  const refreshStatus = recheckConnection;
+  const { notify, showError } = useFeedback();
+  const { connectivity, recheck: recheckConnection } = useWorkspaceHeartbeat(api.status);
 
   const refreshCatalogs = useCallback(async () => {
     try {
@@ -82,8 +48,8 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const refreshAll = useCallback(async () => {
-    await Promise.all([refreshStatus(), refreshCatalogs()]);
-  }, [refreshStatus, refreshCatalogs]);
+    await Promise.all([recheckConnection(), refreshCatalogs()]);
+  }, [recheckConnection, refreshCatalogs]);
 
   // Catalogs are loaded once for consumers; unlike the heartbeat this is not
   // a recurring sync. Mutations retain responsibility for targeted refreshes.
@@ -91,37 +57,28 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<AppStateValue>(
     () => ({
-      status,
-      statusError,
       connectivity,
       recheckConnection,
       catalogs,
-      refreshStatus,
       refreshCatalogs,
       refreshAll,
       notify,
       showError,
     }),
-    [status, statusError, connectivity, recheckConnection, catalogs, refreshStatus, refreshCatalogs, refreshAll, notify, showError],
+    [connectivity, recheckConnection, catalogs, refreshCatalogs, refreshAll, notify, showError],
   );
 
   return (
     <AppStateContext.Provider value={value}>
       {children}
-      <Snackbar
-        open={snackbar !== null}
-        autoHideDuration={snackbar?.severity === 'error' ? 8000 : 4000}
-        onClose={() => setSnackbar(null)}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
-      >
-        {snackbar ? (
-          <Alert variant="filled" severity={snackbar.severity} onClose={() => setSnackbar(null)}>
-            {snackbar.message}
-          </Alert>
-        ) : undefined}
-      </Snackbar>
     </AppStateContext.Provider>
   );
+}
+
+/** Includes exactly one feedback host so legacy AppState consumers and new
+ * useFeedback consumers share records rather than rendering duplicate toasts. */
+export function AppStateProvider({ children }: { children: ReactNode }) {
+  return <FeedbackProvider><AppStateProviderInner>{children}</AppStateProviderInner></FeedbackProvider>;
 }
 
 export function useAppState(): AppStateValue {

@@ -12,12 +12,11 @@
 import type { KeyboardEvent } from 'react';
 import { Box } from '@mui/material';
 import FlightIcon from '@mui/icons-material/Flight';
-import type { Airline, Airport, Catalogs, FlightRecord } from '../api/types';
-import { displayName, unlistedCodeLabel } from '../utils/format';
+import type { Airline, Airport, FlightRecord } from '../api/types';
+import { unlistedCodeLabel } from '../utils/format';
 
 /** Props shared by every archive view: the same filtered API results plus
- *  the record interactions. Edit/delete are optional so read-only contexts
- *  can reuse the views without actions. */
+ *  the open interaction. */
 export interface FlightViewProps {
   flights: FlightRecord[];
   airlineNames: Map<string, string>;
@@ -26,25 +25,9 @@ export interface FlightViewProps {
   /** Optional catalog records used by richer views for airline artwork. */
   airlines?: Map<string, Airline>;
   onOpen: (flight: FlightRecord) => void;
-  onEdit?: (flight: FlightRecord) => void;
-  onDelete?: (flight: FlightRecord) => void;
   /** Accessible label for the open interaction; defaults to the flight-detail
    *  label. */
   openLabel?: (flightNumber: string) => string;
-}
-
-export function buildAirlineNames(catalogs: Catalogs | null, notAvailable: string): Map<string, string> {
-  const map = new Map<string, string>();
-  for (const airline of catalogs?.airlines ?? []) map.set(airline.code, displayName(airline.nameZh, airline.nameEn, notAvailable));
-  return map;
-}
-
-export function buildAirlines(catalogs: Catalogs | null): Map<string, Airline> {
-  return new Map((catalogs?.airlines ?? []).map((airline) => [airline.code, airline]));
-}
-
-export function buildAirports(catalogs: Catalogs | null): Map<string, Airport> {
-  return new Map((catalogs?.airports ?? []).map((airport) => [airport.code, airport]));
 }
 
 /** Airline caption where a catalogued name is expected: the catalogued

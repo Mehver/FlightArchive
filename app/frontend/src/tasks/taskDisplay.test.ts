@@ -3,8 +3,7 @@
 
 /**
  * Characterization of the background-tasks page's pure display/state rules:
- * the poll cadence follows task activity (fast while queued/running, idle
- * otherwise), the list is newest-first with a stable tiebreak, progress is
+ * the list is newest-first with a stable tiebreak, progress is
  * clamped and indeterminate for non-positive totals, and every task state
  * has a deterministic color and label key.
  */
@@ -14,7 +13,6 @@ import type { TaskRecord } from '../api/types';
 import {
   countTasksByState,
   isTaskActive,
-  pollDelayMs,
   sortTasksNewestFirst,
   taskProgress,
   taskStateColor,
@@ -47,23 +45,6 @@ describe('isTaskActive', () => {
   });
 });
 
-describe('pollDelayMs', () => {
-  it('polls fast while any task is queued or running', () => {
-    expect(pollDelayMs([{ state: 'queued' }])).toBe(1000);
-    expect(pollDelayMs([{ state: 'succeeded' }, { state: 'running' }])).toBe(1000);
-  });
-
-  it('polls slowly when the registry is empty or fully terminal', () => {
-    expect(pollDelayMs([])).toBe(5000);
-    expect(pollDelayMs([{ state: 'succeeded' }, { state: 'failed' }])).toBe(5000);
-  });
-
-  it('honours custom delays', () => {
-    expect(pollDelayMs([{ state: 'running' }], 250, 2000)).toBe(250);
-    expect(pollDelayMs([], 250, 2000)).toBe(2000);
-  });
-});
-
 describe('sortTasksNewestFirst', () => {
   it('orders by createdAt descending without mutating the input', () => {
     const oldest = makeTask({ id: 'a', createdAt: '2026-08-28T08:00:00.000Z' });
@@ -75,8 +56,8 @@ describe('sortTasksNewestFirst', () => {
   });
 
   it('breaks createdAt ties on id so the order is stable', () => {
-    const first = makeTask({ id: 'task-a' });
-    const second = makeTask({ id: 'task-b' });
+    const first = makeTask({ id: 'task-20260828T100000000000Z-aaaaaaaa' });
+    const second = makeTask({ id: 'task-20260828T100000000001Z-bbbbbbbb' });
     expect(sortTasksNewestFirst([first, second])).toEqual([second, first]);
     expect(sortTasksNewestFirst([second, first])).toEqual([second, first]);
   });

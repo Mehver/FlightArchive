@@ -32,7 +32,7 @@ def test_boarding_pass_preview_accepts_paper_slots_and_rejects_electronic(tmp_pa
     """The rotated-crop endpoint is a paper-only API contract."""
     application = _app_with_resource(tmp_path)
     with TestClient(application) as client:
-        assert client.post("/api/resources/sync").status_code == 200
+        assert client.post("/api/resources/reconcile").status_code == 200
         payload = {
             "flightNumber": "1", "airlineCode": "CA", "departureAirport": "PEK",
             "arrivalAirport": "SHA", "departureDate": "2026-01-01",
@@ -67,7 +67,7 @@ def test_put_clearing_resource_path_invalidates_split_presentations(tmp_path):
     """Clearing a resource path drops its stale split presentation before validation."""
     application = _app_with_resource(tmp_path)
     with TestClient(application) as client:
-        assert client.post("/api/resources/sync").status_code == 200
+        assert client.post("/api/resources/reconcile").status_code == 200
         payload = {
             "flightNumber": "1", "airlineCode": "CA", "departureAirport": "PEK",
             "arrivalAirport": "SHA", "departureDate": "2026-01-01",

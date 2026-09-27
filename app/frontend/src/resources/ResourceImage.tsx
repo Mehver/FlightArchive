@@ -14,7 +14,7 @@ import { resourceDisplayUrl } from '../rfg/api';
 export function ResourceImage({ resourcePath, size = 56, alt, contain = false }: { resourcePath: string; size?: number; alt: string; contain?: boolean }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => { setFailed(false); }, [resourcePath]);
-  return failed ? <Box sx={{ width: size, height: size, display: 'grid', placeItems: 'center', border: 1, borderColor: 'divider' }}><BrokenImageOutlinedIcon fontSize="small" /></Box> : (
+  return failed ? <Box role="img" aria-label={alt} sx={{ width: size, height: size, display: 'grid', placeItems: 'center', border: 1, borderColor: 'divider' }}><BrokenImageOutlinedIcon fontSize="small" aria-hidden /></Box> : (
     <Box component="img" src={resourceDisplayUrl(resourcePath)} alt={alt} loading="lazy" onError={() => setFailed(true)} sx={{ width: size, height: size, objectFit: contain ? 'contain' : 'cover', borderRadius: 1, border: 1, borderColor: 'divider', display: 'block' }} />
   );
 }

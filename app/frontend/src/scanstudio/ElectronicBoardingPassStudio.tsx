@@ -229,11 +229,11 @@ export function ElectronicBoardingPassStudio({ open, flight, onSaved, onClose }:
         },
         boardingPassColor: boardingPassColor ?? null,
       });
-      notify(t('studioSaved'));
+      notify(t('studioSaved'), 'success', { action: t('studioSave'), form: t('electronicBoardingPass') });
       onSaved(result.flight);
       onClose();
     } catch (error) {
-      showError(error, t('studioSaveFailed'));
+      showError(error, t('studioSaveFailed'), { action: t('studioSave'), form: t('electronicBoardingPass') });
     } finally {
       setSaving(false);
     }

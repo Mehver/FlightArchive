@@ -67,6 +67,7 @@ export interface PlacementBox {
 }
 
 const clamp = (value: number, low: number, high: number) => Math.min(high, Math.max(low, value));
+const MAX_PLACEMENT_DIMENSION_MULTIPLIER = 20;
 
 /**
  * Convert a persisted layout into percentage geometry within the given
@@ -80,8 +81,11 @@ export function placementBox(layout: PaperBoardingPassLayout, template: Template
   if (!crop || !placement) return null;
   if (!Number.isFinite(crop.width) || !Number.isFinite(crop.height) || crop.width <= 0 || crop.height <= 0) return null;
   const croppedAspect = crop.width / crop.height;
-  const w = clamp(placement.scale, 0.01, 10) * template.width * 0.85;
-  const h = w / croppedAspect;
+  const w = Math.min(
+    clamp(placement.scale, 0.01, 10) * template.width * 0.85,
+    template.width * MAX_PLACEMENT_DIMENSION_MULTIPLIER,
+  );
+  const h = Math.min(w / croppedAspect, template.height * MAX_PLACEMENT_DIMENSION_MULTIPLIER);
   const cx = template.width / 2 + clamp(placement.offsetX, -1, 1) * template.width;
   const cy = template.height / 2 + clamp(placement.offsetY, -1, 1) * template.height;
   return {

@@ -24,6 +24,7 @@ require a restart.  Nothing in this module reads or writes BusinessData.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 import tempfile
@@ -34,6 +35,8 @@ from typing import Any
 CONFIG_SCHEMA_VERSION = 1
 CONFIG_FILENAME = "preview-config.json"
 CONFIG_MAX_BYTES = 64 * 1024
+
+logger = logging.getLogger(__name__)
 
 MAX_SOURCE_BYTES_BOUNDS = (1024 * 1024, 1024 * 1024 * 1024)
 MAX_SOURCE_PIXELS_BOUNDS = (1_000_000, 500_000_000)
@@ -175,12 +178,29 @@ def _write_config_atomic(path: Path, document: dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        _fsync_directory(path.parent)
     except OSError:
         try:
             os.unlink(temporary)
         except OSError:
             pass
         raise
+
+
+def _fsync_directory(path: Path) -> None:
+    """Best-effort durability for a rename; unsupported platforms may skip it."""
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        os.fsync(descriptor)
+    except OSError:
+        logger.warning("could not fsync runtime config directory %s", path, exc_info=True)
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                logger.warning("could not close runtime config directory %s", path, exc_info=True)
 
 
 def load_runtime_config(data_root: str | Path) -> RuntimeConfig:
@@ -190,7 +210,7 @@ def load_runtime_config(data_root: str | Path) -> RuntimeConfig:
     the offending file is preserved untouched.
     """
     path = config_path(data_root)
-    if not path.exists():
+    if not os.path.lexists(path):
         _write_config_atomic(path, default_config_document())
     try:
         raw = json.loads(_read_config_bytes(path).decode("utf-8"))

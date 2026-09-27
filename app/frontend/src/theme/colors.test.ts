@@ -4,8 +4,6 @@
 import { describe, expect, test } from 'vitest';
 import {
   buildFlightVisualTheme,
-  getContrastRatio,
-  getReadableTextColor,
   hexToCss,
   hexToRgb,
   isValidHexColor,
@@ -41,15 +39,6 @@ describe('HexColor utilities', () => {
 
   test('hexToCss formats as rgb(...) string', () => {
     expect(hexToCss('#FF8000')).toBe('rgb(255, 128, 0)');
-  });
-
-  test('getContrastRatio calculates WCAG ratio', () => {
-    expect(getContrastRatio('#000000', '#FFFFFF')).toBeCloseTo(21, 0);
-  });
-
-  test('getReadableTextColor suggests correct text color', () => {
-    expect(getReadableTextColor('#000000')).toBe('light');
-    expect(getReadableTextColor('#FFFFFF')).toBe('dark');
   });
 
   test('interpolates and clamps colours to valid sRGB channels', () => {

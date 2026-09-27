@@ -45,8 +45,6 @@ const STATUS = {
     persistence: { mode: 'local', schemaVersion: 1, writable: true, loaded: true, persistenceError: null },
     counts: { flights: 3, airlines: 3, airports: 3, aircraftTypes: 2 },
   },
-  app: 'flightarchive',
-  version: 'test',
 };
 
 const FLIGHTS = [
@@ -72,7 +70,6 @@ function mockBackend(options: {
   catalogResults?: Catalogs[];
 } = {}) {
   const batchCalls: BatchCall[] = [];
-  const singleDeletes: string[] = [];
   const updateCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
   const batchQueue = [...(options.batchResults ?? [])];
   const catalogResults = [...(options.catalogResults ?? [])];
@@ -80,27 +77,23 @@ function mockBackend(options: {
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.includes('/api/workspace/status')) return jsonResponse(STATUS);
+      if (url.includes('/api/status')) return jsonResponse(STATUS);
       if (url === '/api/catalogs') return jsonResponse(catalogResults.shift() ?? options.catalogs ?? CATALOGS);
       if (url === '/api/flights') return jsonResponse({ flights: options.flights ?? (FLIGHTS as FlightRecord[]) });
       if (url.startsWith('/api/catalogs/') && init?.method === 'PUT') {
         updateCalls.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> });
         return jsonResponse({ entry: {} });
       }
-      if (url === '/api/catalogs/airlines' && init?.method === 'DELETE') {
+      if (url === '/api/catalogs/airlines/delete' && init?.method === 'POST') {
         const payload = JSON.parse(String(init.body)) as BatchCall;
         batchCalls.push(payload);
         const next = batchQueue.shift() ?? { body: { deleted: payload.keys } };
         return jsonResponse(next.body, next.status ?? 200);
       }
-      if (url.startsWith('/api/catalogs/airlines/') && init?.method === 'DELETE') {
-        singleDeletes.push(decodeURIComponent(url.slice('/api/catalogs/airlines/'.length)));
-        return jsonResponse({ deleted: 'CA' });
-      }
       return jsonResponse({}, 404);
     }),
   );
-  return { batchCalls, singleDeletes, updateCalls };
+  return { batchCalls, updateCalls };
 }
 
 function renderPage() {
@@ -308,15 +301,14 @@ describe('ReferenceLibraryPage batch deletion', () => {
 
 describe('ReferenceLibraryPage single-row behavior', () => {
   it('keeps the single-row delete flow intact alongside selection', async () => {
-    const { singleDeletes, batchCalls } = mockBackend();
+    const { batchCalls } = mockBackend();
     renderPage();
     await firstRowVisible();
     fireEvent.click(screen.getAllByRole('button', { name: /delete catalog entry/i })[0]);
     const dialog = await screen.findByRole('dialog');
     expect(dialog.textContent).toContain('Delete CA?');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
-    await waitFor(() => expect(singleDeletes).toEqual(['CA']));
-    expect(batchCalls).toEqual([]);
+    await waitFor(() => expect(batchCalls).toEqual([{ keys: ['CA'], force: false }]));
   });
 });
 
@@ -358,7 +350,7 @@ describe('ReferenceLibraryPage unlisted flight references', () => {
   });
 
   it('excludes derived rows from select-all and deletion while retaining persisted rows', async () => {
-    const { batchCalls, singleDeletes } = mockBackend({ flights: UNLISTED_FLIGHTS });
+    const { batchCalls } = mockBackend({ flights: UNLISTED_FLIGHTS });
     renderPage();
     await openAirlinesTab();
     await screen.findAllByText('未收录 · Unlisted');
@@ -369,7 +361,6 @@ describe('ReferenceLibraryPage unlisted flight references', () => {
     fireEvent.click(screen.getByRole('button', { name: /delete selected \(3\)/i }));
     fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(batchCalls).toEqual([{ keys: ['CA', 'MU', 'CZ'], force: false }]));
-    expect(singleDeletes).toEqual([]);
   });
 
   it('filters derived rows and renders them when the persisted catalog is empty', async () => {

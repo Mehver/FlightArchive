@@ -3,8 +3,8 @@
 
 /**
  * Pure display/state helpers for the background-tasks page. The backend
- * (GET /api/tasks) is authoritative; these helpers only decide poll cadence,
- * ordering, counts, progress and status coloring for the read-only view.
+ * (GET /api/tasks) is authoritative; these helpers only decide ordering,
+ * counts, progress and status coloring for the read-only view.
  */
 
 import type { TaskRecord, TaskState } from '../api/types';
@@ -13,19 +13,6 @@ import type { TranslationKey } from '../i18n';
 /** A task that still has work ahead of it drives the fast poll cadence. */
 export function isTaskActive(task: Pick<TaskRecord, 'state'>): boolean {
   return task.state === 'queued' || task.state === 'running';
-}
-
-/**
- * Poll cadence: fast (activeMs) while any task is queued/running so progress
- * feels live; slow (idleMs) once everything reached a terminal state. An
- * empty registry is idle.
- */
-export function pollDelayMs(
-  tasks: readonly Pick<TaskRecord, 'state'>[],
-  activeMs = 1000,
-  idleMs = 5000,
-): number {
-  return tasks.some(isTaskActive) ? activeMs : idleMs;
 }
 
 /** Newest first by createdAt; ties break on id so the order is stable. The input array is not mutated. */

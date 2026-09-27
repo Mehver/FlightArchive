@@ -40,20 +40,24 @@ describe('calculateAutoFit', () => {
   });
 
   describe('short edge fit', () => {
-    it('fills template height when crop is wider than template', () => {
+    it('contains a crop that is wider than the template', () => {
       const crop = { width: 500, height: 100 }; // aspect 5.0 > tpl aspect 2.47
       const result = calculateAutoFit(crop, template, 'short', 'center');
-      expect(result.h).toBe(100);
-      expect(result.w).toBeCloseTo(100 * 5.0);
+      expect(result.w).toBe(247);
+      expect(result.h).toBeCloseTo(247 / 5.0);
+      expect(result.w).toBeLessThanOrEqual(template.width);
+      expect(result.h).toBeLessThanOrEqual(template.height);
       expect(result.cx).toBeCloseTo(247 / 2);
       expect(result.cy).toBeCloseTo(100 / 2);
     });
 
-    it('fills template width when crop is taller than template', () => {
+    it('contains a vertical crop without overflowing the template', () => {
       const crop = { width: 200, height: 400 }; // aspect 0.5 < tpl aspect 2.47
       const result = calculateAutoFit(crop, template, 'short', 'center');
-      expect(result.w).toBe(247);
-      expect(result.h).toBeCloseTo(247 / 0.5);
+      expect(result.h).toBe(100);
+      expect(result.w).toBeCloseTo(100 * 0.5);
+      expect(result.w).toBeLessThanOrEqual(template.width);
+      expect(result.h).toBeLessThanOrEqual(template.height);
       expect(result.cx).toBeCloseTo(247 / 2);
       expect(result.cy).toBeCloseTo(100 / 2);
     });

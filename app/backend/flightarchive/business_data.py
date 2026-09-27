@@ -9,7 +9,9 @@ virtual paths; source scans and local filesystem paths never enter this contract
 from __future__ import annotations
 
 import json
+import logging
 import os
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +19,8 @@ from typing import Any
 
 BUSINESS_DATA_SCHEMA_VERSION = 1
 BUSINESS_DATA_FILENAME = "business-data.json"
+
+logger = logging.getLogger(__name__)
 
 
 class BusinessDataError(Exception):
@@ -40,8 +44,7 @@ def parse_business_data(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise BusinessDataError("business data must be a JSON object")
     version = raw.get("schemaVersion")
-    # Booleans compare equal to ints, so reject them explicitly.
-    if isinstance(version, bool) or version != BUSINESS_DATA_SCHEMA_VERSION:
+    if type(version) is not int or version != BUSINESS_DATA_SCHEMA_VERSION:
         raise BusinessDataError(f"business data schemaVersion must be exactly {BUSINESS_DATA_SCHEMA_VERSION}")
     for key in ("airlines", "airports", "aircraftTypes", "flights"):
         if key not in raw:
@@ -69,11 +72,18 @@ def parse_business_data(raw: Any) -> dict[str, Any]:
     from .domain.models import (
         validate_electronic_boarding_pass,
         validate_paper_boarding_pass_layouts,
+        validate_persisted_resource_paths,
     )
+    for index, airline in enumerate(raw.get("airlines") or []):
+        if isinstance(airline, dict):
+            issues = validate_persisted_resource_paths(airline)
+            if issues:
+                raise BusinessDataError(f"airline {index} resource paths: {'; '.join(issues)}")
     for index, flight in enumerate(raw.get("flights") or []):
         if not isinstance(flight, dict):
             continue
-        issues = validate_paper_boarding_pass_layouts(flight.get("paperBoardingPassLayouts", {}), flight)
+        issues = validate_persisted_resource_paths(flight)
+        issues.extend(validate_paper_boarding_pass_layouts(flight.get("paperBoardingPassLayouts", {}), flight))
         issues.extend(validate_electronic_boarding_pass(flight.get("electronicBoardingPass"), flight))
         if issues:
             raise BusinessDataError(f"flight {index} boarding-pass presentation: {'; '.join(issues)}")
@@ -82,10 +92,29 @@ def parse_business_data(raw: Any) -> dict[str, Any]:
 
 def read_business_data(path: Path) -> dict[str, Any]:
     try:
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode):
+            raise BusinessDataError(f"business data must not be a symlink: {path}")
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise BusinessDataError("could not read valid business data JSON") from exc
     return parse_business_data(raw)
+
+
+def _fsync_directory(path: Path) -> None:
+    """Best-effort durability for a rename; unsupported platforms may skip it."""
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        os.fsync(descriptor)
+    except OSError:
+        logger.warning("could not fsync business data directory %s", path, exc_info=True)
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                logger.warning("could not close business data directory %s", path, exc_info=True)
 
 
 def write_business_data_atomic(path: Path, data: dict[str, Any]) -> None:
@@ -101,6 +130,7 @@ def write_business_data_atomic(path: Path, data: dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_name, path)
+        _fsync_directory(path.parent)
     except OSError:
         try:
             os.unlink(temp_name)
@@ -117,14 +147,11 @@ class BusinessDataPersistence:
     last_error: str | None = None
 
     @property
-    def mode(self) -> str: return "local"
-
-    @property
     def path(self) -> Path:
         return self.directory / "flightarchive" / "v1" / BUSINESS_DATA_FILENAME
 
     def load(self) -> dict[str, Any] | None:
-        if not self.path.exists():
+        if not os.path.lexists(self.path):
             return None
         try:
             data = read_business_data(self.path)

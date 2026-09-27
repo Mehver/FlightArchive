@@ -76,14 +76,6 @@ function namedPresetName(value: unknown): string | null {
   return name && name !== DEFAULT_PRESET_NAME ? name : null;
 }
 
-function samePresetGeometry(a: ElectronicCropPreset, b: ElectronicCropPreset): boolean {
-  return a.mirrorAcrossImageCenterX === b.mirrorAcrossImageCenterX
-    && a.crop.centerX === b.crop.centerX
-    && a.crop.centerY === b.crop.centerY
-    && a.crop.width === b.crop.width
-    && a.crop.height === b.crop.height;
-}
-
 /**
  * Build picker entries from currently loaded business records only. Sorting by
  * flight ID makes duplicate names stable; the first valid layout wins if a
@@ -105,9 +97,7 @@ export function electronicCropPresetsFromFlights(flights: FlightRecord[]): Elect
       },
       mirrorAcrossImageCenterX: extraction.crop.mirrorAcrossImageCenterX,
     };
-    const existing = presets.find((candidate) => candidate.name === name);
-    if (!existing) presets.push(preset);
-    else if (samePresetGeometry(existing, preset)) continue;
+    if (!presets.some((candidate) => candidate.name === name)) presets.push(preset);
   }
   return presets;
 }

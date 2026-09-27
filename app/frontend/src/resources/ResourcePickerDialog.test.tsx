@@ -13,9 +13,9 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import type { MappingDocument } from '../rfg/api';
-import { LanguageProvider } from '../i18n';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import type { ResourceReviewRow } from '../api/types';
+import { LanguageProvider, useTranslation } from '../i18n';
 import { ResourcePickerDialog } from './ResourcePickerDialog';
 
 afterEach(cleanup);
@@ -24,35 +24,23 @@ afterEach(() => vi.unstubAllGlobals());
 const SELECTED: string[] = [];
 const IMAGE_PATH = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/pass.png';
 
-function mockBackend(
-  entries: MappingDocument['entries'],
-  { flights = [], airlines = [], localFiles = entries.map((entry) => ({ local_path: entry.local_path })) }: {
-    flights?: unknown[]; airlines?: unknown[]; localFiles?: { local_path: string }[];
-  } = {},
-) {
+const noCapabilities = { ignore: false, unignore: false, release: false, fingerprint: false, rematchTarget: false, rematchCandidate: false };
+
+function reviewRow(virtualPath: string, localPath: string, overrides: Partial<ResourceReviewRow> = {}): ResourceReviewRow {
+  return { virtualPath, localPath, state: 'mapped', present: true, sizeBytes: null, fingerprints: [], uses: [], capabilities: { ...noCapabilities, release: true }, ...overrides };
+}
+
+function mockBackend(rows: ResourceReviewRow[]) {
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (input: RequestInfo | URL) => {
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes('/api/resources/ignore')) {
-        const ignored = entries.map((entry) => entry.virtual_path.startsWith('inbox/') ? { ...entry, virtual_path: `ignore/${entry.local_path}` } : entry);
-        return { ok: true, json: async () => ({ ignoredVirtualPath: ignored[0].virtual_path, mapping: { entries: ignored }, localFiles, etag: '"v2"' }) } as unknown as Response;
+        expect(JSON.parse(String(init?.body))).toEqual({ ifMatch: '"v1"', virtualPaths: ['inbox/scan.pdf'] });
+        return { ok: true, json: async () => ({ ignored: ['ignore/scan.pdf'], count: 1, revision: '"v2"' }) } as unknown as Response;
       }
-      if (url.includes('/api/resources/sync')) {
-        return { ok: true, json: async () => ({ cataloged: entries.length, added: 0 }) } as unknown as Response;
-      }
-      if (url.includes('/api/v1/meta/map')) {
-        return { ok: true, json: async () => ({ entries }), headers: { get: () => null } } as unknown as Response;
-      }
-      if (url.includes('/api/resources/catalog')) {
-        return { ok: true, json: async () => ({ localFiles }) } as unknown as Response;
-      }
-      if (url.includes('/api/flights')) {
-        return { ok: true, json: async () => ({ flights }) } as unknown as Response;
-      }
-      if (url.includes('/api/catalogs')) {
-        return { ok: true, json: async () => ({ airlines, airports: [], aircraftTypes: [] }) } as unknown as Response;
-      }
+      if (url.includes('/api/resources/reconcile')) return { ok: true, json: async () => ({ revision: '"v1"', rows }) } as unknown as Response;
+      if (url.includes('/api/resources/review')) return { ok: true, json: async () => ({ revision: '"v2"', rows: rows.filter((row) => row.state !== 'pending') }) } as unknown as Response;
       return { ok: false, status: 404, json: async () => ({}) } as unknown as Response;
     }),
   );
@@ -70,20 +58,24 @@ function renderPicker(props: Partial<Parameters<typeof ResourcePickerDialog>[0]>
 }
 
 const MIXED_ENTRIES = [
-  { virtual_path: 'inbox/scan.pdf', local_path: '/local/scan.pdf' },
-  { virtual_path: 'objects/notes.txt', local_path: '/local/notes.txt' },
-  { virtual_path: IMAGE_PATH, local_path: '/local/pass.png' },
+  reviewRow('inbox/scan.pdf', '/local/scan.pdf', { state: 'pending', capabilities: { ...noCapabilities, ignore: true, rematchCandidate: true } }),
+  reviewRow('objects/notes.txt', '/local/notes.txt'),
+  reviewRow(IMAGE_PATH, '/local/pass.png'),
 ];
 const IN_USE_PATH = 'objects/shared.png';
-const IN_USE_ENTRIES = [{ virtual_path: IN_USE_PATH, local_path: '/local/shared.png' }];
-const IN_USE_CONTEXT = {
-  flights: [{ id: 'f1', airlineCode: 'SF', flightNumber: '12', departureDate: '2026-01-02', paperBoardingPassFrontResourcePath: IN_USE_PATH, attachmentResourcePaths: [IN_USE_PATH] }],
-  airlines: [{ code: 'SF', horizontalLogoResourcePath: IN_USE_PATH, horizontalDarkLogoResourcePath: null, symbolLogoResourcePath: IN_USE_PATH }],
-};
+const IN_USE_ENTRIES = [reviewRow(IN_USE_PATH, '/local/shared.png', {
+  uses: [
+    { kind: 'flight', id: 'f1', airlineCode: 'SF', flightNumber: '12', departureDate: '2026-01-02', role: 'paperBoardingPassFront' },
+    { kind: 'flight', id: 'f1', airlineCode: 'SF', flightNumber: '12', departureDate: '2026-01-02', role: 'attachment' },
+    { kind: 'airline', code: 'SF', role: 'horizontal' },
+    { kind: 'airline', code: 'SF', role: 'symbol' },
+  ],
+  capabilities: { ...noCapabilities, fingerprint: true },
+})];
 
 describe('ResourcePickerDialog thumbnail view', () => {
   it('ignores a selected inbox file and removes it from the selectable list', async () => {
-    mockBackend([{ virtual_path: 'inbox/scan.pdf', local_path: '/local/scan.pdf' }]);
+    mockBackend([reviewRow('inbox/scan.pdf', '/local/scan.pdf', { state: 'pending', capabilities: { ...noCapabilities, ignore: true, rematchCandidate: true } })]);
     const { onConfirm } = renderPicker();
     await screen.findByText('inbox/scan.pdf');
     fireEvent.click(screen.getByText('inbox/scan.pdf'));
@@ -110,7 +102,7 @@ describe('ResourcePickerDialog thumbnail view', () => {
   });
 
   it('keeps mapped resources in use visible, selectable, and clearly contextualized', async () => {
-    mockBackend(IN_USE_ENTRIES, IN_USE_CONTEXT);
+    mockBackend(IN_USE_ENTRIES);
     const { onConfirm } = renderPicker();
     await screen.findByText(IN_USE_PATH);
 
@@ -121,24 +113,46 @@ describe('ResourcePickerDialog thumbnail view', () => {
     expect(await screen.findByText('SF12 · 2026-01-02 · Attachment')).toBeTruthy();
     expect(screen.getByText('SF · Horizontal logo')).toBeTruthy();
     expect(screen.getByText('SF · Symbol logo')).toBeTruthy();
-    fireEvent.click(screen.getByText(IN_USE_PATH));
+    const cardButton = screen.getByRole('button', { name: new RegExp(IN_USE_PATH) });
+    expect(cardButton.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(cardButton);
+    expect(cardButton.getAttribute('aria-pressed')).toBe('true');
     fireEvent.click(screen.getByRole('button', { name: /select resource/i }));
     expect(onConfirm).toHaveBeenCalledWith([IN_USE_PATH]);
   });
 
-  it('shows missing mappings as unavailable without loading their thumbnail or allowing a new selection', async () => {
-    const missing = { virtual_path: 'objects/lost.png', local_path: '/local/lost.png' };
-    mockBackend([missing], { localFiles: [] });
-    const { onConfirm } = renderPicker();
-    await screen.findByText(missing.virtual_path);
+  it('uses its visible title as the dialog accessible name', async () => {
+    mockBackend(MIXED_ENTRIES);
+    renderPicker();
+    expect(await screen.findByRole('dialog', { name: 'Attachments' })).toBeTruthy();
+  });
 
-    expect(screen.getByText(/file unavailable/i)).toBeTruthy();
+  it('shows missing mappings as missing sources without loading their thumbnail or allowing a new selection', async () => {
+    const missing = reviewRow('objects/lost.png', '/local/lost.png', { state: 'missing', present: false, uses: [{ kind: 'flight', id: 'f1', airlineCode: 'SF', flightNumber: '12', departureDate: '2026-01-02', role: 'attachment' }], capabilities: { ...noCapabilities, rematchTarget: true } });
+    mockBackend([missing]);
+    const { onConfirm } = renderPicker();
+    await screen.findByText(missing.virtualPath!);
+
+    expect(screen.getByText(/missing source/i)).toBeTruthy();
     expect(document.querySelectorAll('img')).toHaveLength(0);
-    const card = screen.getByRole('button', { name: new RegExp(missing.virtual_path) });
+    const card = screen.getByRole('button', { name: new RegExp(missing.virtualPath!) });
     expect(card.hasAttribute('disabled')).toBe(true);
     fireEvent.click(card);
     expect(screen.getByRole('button', { name: /select resource/i }).hasAttribute('disabled')).toBe(true);
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('retains a missing mapping that was selected when the dialog opened', async () => {
+    const missing = reviewRow('objects/lost.png', '/local/lost.png', { state: 'missing', present: false, capabilities: { ...noCapabilities, rematchTarget: true } });
+    mockBackend([missing]);
+    const { onConfirm } = renderPicker({ selected: [missing.virtualPath!] });
+    await screen.findByText(missing.virtualPath!);
+
+    expect(screen.getByTestId('CheckCircleIcon')).toBeTruthy();
+    const confirm = screen.getByRole('button', { name: /select resource/i });
+    expect(confirm.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(confirm);
+    expect(onConfirm).toHaveBeenCalledWith([missing.virtualPath]);
   });
 });
 
@@ -177,7 +191,7 @@ describe('ResourcePickerDialog list view', () => {
   });
 
   it('keeps mapped resources in use selectable with their usage context', async () => {
-    mockBackend(IN_USE_ENTRIES, IN_USE_CONTEXT);
+    mockBackend(IN_USE_ENTRIES);
     const { onConfirm } = renderPicker();
     await screen.findByText(IN_USE_PATH);
     fireEvent.click(screen.getByRole('button', { name: /list view/i }));
@@ -195,11 +209,11 @@ describe('ResourcePickerDialog list view', () => {
   });
 
   it('does not present a stale inbox mapping after sync/catalog refresh', async () => {
-    const missing = { virtual_path: 'inbox/stale.pdf', local_path: '/local/stale.pdf' };
-    mockBackend([missing], { localFiles: [] });
-    const { onConfirm } = renderPicker({ selected: [missing.virtual_path] });
+    const missing = reviewRow('inbox/stale.pdf', '/local/stale.pdf', { state: 'pending', present: false, capabilities: noCapabilities });
+    mockBackend([missing]);
+    const { onConfirm } = renderPicker({ selected: [missing.virtualPath!] });
     await screen.findByText('No Entries Found');
-    expect(screen.queryByText(missing.virtual_path)).toBeNull();
+    expect(screen.queryByText(missing.virtualPath!)).toBeNull();
     expect(screen.getByRole('button', { name: /select resource/i }).getAttribute('disabled')).not.toBeNull();
     expect(onConfirm).not.toHaveBeenCalled();
   });
@@ -215,6 +229,7 @@ describe('ResourcePickerDialog list view', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /thumbnail view/i }));
     expect(screen.getByTestId('CheckCircleIcon')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /inbox\/scan\.pdf/i }).getAttribute('aria-pressed')).toBe('true');
 
     const confirm = screen.getByRole('button', { name: /select resource/i });
     expect(confirm.hasAttribute('disabled')).toBe(false);
@@ -237,9 +252,9 @@ describe('ResourcePickerDialog list view', () => {
 
   it('keeps the selection across pages of the same filtered list', async () => {
     const many = Array.from({ length: 30 }, (_, index) => ({
-      virtual_path: `inbox/file-${String(index).padStart(2, '0')}.pdf`,
-      local_path: `/local/file-${index}.pdf`,
-    }));
+      virtualPath: `inbox/file-${String(index).padStart(2, '0')}.pdf`,
+      localPath: `/local/file-${index}.pdf`,
+    })).map(({ virtualPath, localPath }) => reviewRow(virtualPath, localPath, { state: 'pending', capabilities: { ...noCapabilities, ignore: true, rematchCandidate: true } }));
     mockBackend(many);
     renderPicker();
     await screen.findByText('1–24 of 30');
@@ -255,5 +270,147 @@ describe('ResourcePickerDialog list view', () => {
     await screen.findByText('1–24 of 30');
     const confirm = screen.getByRole('button', { name: /select resource/i });
     expect(confirm.hasAttribute('disabled')).toBe(false);
+  });
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function LanguageToggle() {
+  const { toggleLanguage } = useTranslation();
+  return <button type="button" onClick={toggleLanguage}>toggle language</button>;
+}
+
+describe('ResourcePickerDialog load lifetime', () => {
+  it('does not reload or reset selection, search, or page when a parent passes an equivalent new selected array', async () => {
+    const many = Array.from({ length: 30 }, (_, index) => ({
+      virtualPath: `inbox/file-${String(index).padStart(2, '0')}.pdf`,
+      localPath: `/local/file-${index}.pdf`,
+    })).map(({ virtualPath, localPath }) => reviewRow(virtualPath, localPath, { state: 'pending', capabilities: { ...noCapabilities, ignore: true, rematchCandidate: true } }));
+    mockBackend(many);
+    const fetchMock = vi.mocked(fetch);
+    const props = { open: true, title: 'Attachments', selected: [] as string[], multiple: true, onConfirm: vi.fn(), onClose: vi.fn() };
+    const view = render(<LanguageProvider><ResourcePickerDialog {...props} /></LanguageProvider>);
+    await screen.findByText('1–24 of 30');
+
+    fireEvent.change(screen.getByLabelText('Search Resources'), { target: { value: 'file' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Go to page 2' }));
+    fireEvent.click(screen.getByText('inbox/file-24.pdf'));
+    const requestCount = fetchMock.mock.calls.length;
+
+    view.rerender(<LanguageProvider><ResourcePickerDialog {...props} selected={[]} /></LanguageProvider>);
+
+    expect(fetchMock).toHaveBeenCalledTimes(requestCount);
+    expect(screen.getByLabelText('Search Resources')).toHaveProperty('value', 'file');
+    expect(screen.getByText('25–30 of 30')).toBeTruthy();
+    expect(screen.getByTestId('CheckCircleIcon')).toBeTruthy();
+  });
+
+  it('ignores an earlier opening response that arrives after a newer opening response', async () => {
+    const mappings = [deferred<Response>(), deferred<Response>()];
+    const mappingSignals: AbortSignal[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/resources/reconcile')) {
+        mappingSignals.push(init?.signal as AbortSignal);
+        return mappings[mappingSignals.length - 1].promise;
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }));
+    const props = { title: 'Attachments', selected: [] as string[], onConfirm: vi.fn(), onClose: vi.fn() };
+    const view = render(<LanguageProvider><ResourcePickerDialog open {...props} /></LanguageProvider>);
+    await waitFor(() => expect(mappingSignals).toHaveLength(1));
+    view.rerender(<LanguageProvider><ResourcePickerDialog open={false} {...props} /></LanguageProvider>);
+    view.rerender(<LanguageProvider><ResourcePickerDialog open {...props} /></LanguageProvider>);
+    await waitFor(() => expect(mappingSignals).toHaveLength(2));
+
+    const row = (name: string): ResourceReviewRow => ({ virtualPath: `inbox/${name}.pdf`, localPath: `/local/${name}.pdf`, state: 'pending', present: true, sizeBytes: null, fingerprints: [], uses: [], capabilities: { ignore: true, unignore: false, release: false, fingerprint: false, rematchTarget: false, rematchCandidate: true } });
+    await act(async () => mappings[1].resolve({ ok: true, json: async () => ({ revision: 'new', rows: [row('new')] }) } as unknown as Response));
+    expect(await screen.findByText('inbox/new.pdf')).toBeTruthy();
+    await act(async () => mappings[0].resolve({ ok: true, json: async () => ({ revision: 'old', rows: [row('old')] }) } as unknown as Response));
+
+    expect(mappingSignals[0].aborted).toBe(true);
+    expect(screen.getByText('inbox/new.pdf')).toBeTruthy();
+    expect(screen.queryByText('inbox/old.pdf')).toBeNull();
+  });
+
+  it('aborts an in-flight opening load on close and ignores its eventual response', async () => {
+    const mapping = deferred<Response>();
+    let mappingSignal: AbortSignal | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/resources/reconcile')) {
+        mappingSignal = init?.signal as AbortSignal;
+        return mapping.promise;
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }));
+    const props = { title: 'Attachments', selected: [] as string[], onConfirm: vi.fn(), onClose: vi.fn() };
+    const view = render(<LanguageProvider><ResourcePickerDialog open {...props} /></LanguageProvider>);
+    await waitFor(() => expect(mappingSignal).toBeDefined());
+    view.rerender(<LanguageProvider><ResourcePickerDialog open={false} {...props} /></LanguageProvider>);
+    expect(mappingSignal?.aborted).toBe(true);
+
+    await act(async () => mapping.resolve({ ok: true, json: async () => ({ revision: 'late', rows: [{ virtualPath: 'inbox/late.pdf', localPath: '/local/late.pdf', state: 'pending', present: true, sizeBytes: null, fingerprints: [], uses: [], capabilities: { ignore: true, unignore: false, release: false, fingerprint: false, rematchTarget: false, rematchCandidate: true } }] }) } as unknown as Response));
+    expect(screen.queryByText('inbox/late.pdf')).toBeNull();
+  });
+
+  it('does not let an ignore completion from an old opening mutate a reopened picker', async () => {
+    const ignored = deferred<Response>();
+    let reconcileCalls = 0;
+    let reviewCalls = 0;
+    const oldRow = reviewRow('inbox/old.pdf', '/local/old.pdf', { state: 'pending', capabilities: { ...noCapabilities, ignore: true, rematchCandidate: true } });
+    const newRow = reviewRow('objects/new.pdf', '/local/new.pdf');
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/api/resources/reconcile')) {
+        reconcileCalls += 1;
+        const rows = reconcileCalls === 1 ? [oldRow] : [newRow];
+        return { ok: true, json: async () => ({ revision: `"v${reconcileCalls}"`, rows }) } as Response;
+      }
+      if (url.includes('/api/resources/ignore')) return ignored.promise;
+      if (url.includes('/api/resources/review')) {
+        reviewCalls += 1;
+        return { ok: true, json: async () => ({ revision: '"review"', rows: [] }) } as Response;
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }));
+    const props = { title: 'Attachments', selected: [] as string[], onConfirm: vi.fn(), onClose: vi.fn() };
+    const view = render(<LanguageProvider><ResourcePickerDialog open {...props} /></LanguageProvider>);
+    fireEvent.click(await screen.findByText('inbox/old.pdf'));
+    fireEvent.click(screen.getByRole('button', { name: 'Ignore Resource' }));
+
+    view.rerender(<LanguageProvider><ResourcePickerDialog open={false} {...props} /></LanguageProvider>);
+    view.rerender(<LanguageProvider><ResourcePickerDialog open {...props} /></LanguageProvider>);
+    fireEvent.click(await screen.findByText('objects/new.pdf'));
+    const confirm = screen.getByRole('button', { name: 'Select Resource' });
+    expect(confirm.hasAttribute('disabled')).toBe(false);
+
+    await act(async () => ignored.resolve({ ok: true, json: async () => ({ ignored: ['ignore/old.pdf'], count: 1, revision: '"old"' }) } as Response));
+    expect(confirm.hasAttribute('disabled')).toBe(false);
+    expect(reviewCalls).toBe(0);
+  });
+
+  it('keeps the temporary selection and inventory when the language changes', async () => {
+    localStorage.setItem('flightarchive.ui.language', 'en');
+    mockBackend(MIXED_ENTRIES);
+    const fetchMock = vi.mocked(fetch);
+    render(
+      <LanguageProvider>
+        <LanguageToggle />
+        <ResourcePickerDialog open title="Attachments" selected={[]} onConfirm={vi.fn()} onClose={vi.fn()} />
+      </LanguageProvider>,
+    );
+    await screen.findByText('inbox/scan.pdf');
+    fireEvent.click(screen.getByText('inbox/scan.pdf'));
+    const requestCount = fetchMock.mock.calls.length;
+
+    fireEvent.click(screen.getByText('toggle language'));
+
+    expect(fetchMock).toHaveBeenCalledTimes(requestCount);
+    expect(screen.getByTestId('CheckCircleIcon')).toBeTruthy();
   });
 });

@@ -53,8 +53,8 @@ describe('ResourceImage', () => {
     const img = screen.getByAltText('scan');
     expect(img.getAttribute('src')).toBe('/images/inbox/huge.tiff');
     fireEvent.error(img);
-    // No <img> remains at all: the original route is never used for rasters.
-    expect(screen.queryByAltText('scan')).toBeNull();
+    // No <img> remains, but the placeholder retains the image's accessible name.
+    expect(screen.getByRole('img', { name: 'scan' })).toBeTruthy();
     expect(renderedImg(container)).toBeNull();
     expect(container.firstChild).not.toBeNull();
   });
@@ -62,6 +62,7 @@ describe('ResourceImage', () => {
   it('shows the broken-image placeholder when even an SVG original fails', () => {
     const { container } = render(<ResourceImage resourcePath="inbox/icon.svg" alt="icon" />);
     fireEvent.error(screen.getByAltText('icon'));
+    expect(screen.getByRole('img', { name: 'icon' })).toBeTruthy();
     expect(renderedImg(container)).toBeNull();
     expect(container.firstChild).not.toBeNull();
   });

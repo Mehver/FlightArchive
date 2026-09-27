@@ -17,6 +17,7 @@ Two concrete gaps are pinned here before behavior-neutral cleanup:
 from __future__ import annotations
 
 import hashlib
+import time
 
 from fastapi.testclient import TestClient
 
@@ -29,6 +30,10 @@ def app(tmp_path, files: dict[str, bytes] | None = None):
     for name, content in (files or {"ticket.png": b"ticket"}).items():
         (root / name).write_bytes(content)
     return create_app(resource_root=root, data_root=data)
+
+
+def _tasks(client):
+    return [task for day in client.get("/api/tasks").json()["days"] for task in day["tasks"]]
 
 
 def _map_object(client, inbox: str) -> str:
@@ -50,54 +55,112 @@ def _flight(client, **fields) -> None:
 
 def _fingerprint(client, paths, algorithms=("sha256",), **extra):
     payload = {"virtualPaths": paths, "algorithms": list(algorithms)}
+    if "ifMatch" not in extra:
+        payload["ifMatch"] = client.get("/api/v1/meta/map").headers["etag"]
     payload.update(extra)
     return client.post("/api/resources/fingerprints", json=payload)
+
+
+def _await_task(client, task_id):
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        task = next((item for item in _tasks(client) if item["id"] == task_id), None)
+        if task is not None and task["state"] in {"succeeded", "failed"}:
+            return task
+        time.sleep(0.01)
+    raise AssertionError(f"task {task_id} did not finish")
 
 
 def test_rematch_clears_stored_fingerprints_and_preserves_virtual_path(tmp_path):
     application = app(tmp_path)
     with TestClient(application) as client:
-        client.post("/api/resources/sync")
+        client.post("/api/resources/reconcile")
         path = _map_object(client, "inbox/ticket.png")
         _flight(client, paperBoardingPassFrontResourcePath=path)
         stored = _fingerprint(client, [path], ("crc32", "sha256"))
-        assert stored.status_code == 200
-        old = next(item for item in stored.json()["mapping"]["entries"] if item["virtual_path"] == path)
+        assert stored.status_code == 202
+        task = _await_task(client, stored.json()["task"]["id"])
+        assert task["state"] == "succeeded" and task["total"] == 2
+        old = next(item for item in client.get("/api/v1/meta/map").json()["entries"] if item["virtual_path"] == path)
         assert old["crc32"] and old["sha256"] and old["size_bytes"] == len(b"ticket")
 
         # The source is replaced on disk; the classified entry becomes missing.
         (tmp_path / "resources" / "ticket.png").unlink()
         (tmp_path / "resources" / "replacement.png").write_bytes(b"replacement")
-        client.post("/api/resources/sync")
+        client.post("/api/resources/reconcile")
 
-        response = client.post("/api/resources/rematches", json={"matches": [{"targetVirtualPath": path, "candidateInboxVirtualPath": "inbox/replacement.png"}]})
+        etag = client.get("/api/v1/meta/map").headers["etag"]
+        response = client.post("/api/resources/rematch", json={"ifMatch": etag, "mode": "explicit", "matches": [{"targetVirtualPath": path, "candidateInboxVirtualPath": "inbox/replacement.png"}]})
         assert response.status_code == 200
-        # The retained target keeps its virtual path and only gains the new
-        # local source plus fresh catalog size: no hash field survives.
-        target = next(item for item in response.json()["mapping"]["entries"] if item["virtual_path"] == path)
-        assert target == {"virtual_path": path, "local_path": "replacement.png", "size_bytes": len(b"replacement")}
-        persisted = next(item for item in client.get("/api/v1/meta/map").json()["entries"] if item["virtual_path"] == path)
-        assert persisted == target
+        assert set(response.json()) == {"applied", "ambiguous", "unmatched", "revision"}
 
-        # The preserved path stays flight-bound and present, so hashes can be
-        # recalculated — and they describe the replacement, not the stale file.
-        recalculated = _fingerprint(client, [path], ("crc32", "sha256"))
-        assert recalculated.status_code == 200
-        fresh = next(item for item in recalculated.json()["mapping"]["entries"] if item["virtual_path"] == path)
+        # Explicit rematch automatically schedules every content and
+        # perceptual fingerprint for the newly bound source.
+        automatic = next(task for task in _tasks(client) if task["id"] != stored.json()["task"]["id"])
+        assert {item["virtualPath"] for item in automatic["items"]} == {path}
+        assert {item["algorithm"] for item in automatic["items"]} == {
+            "crc32", "md5", "sha256", "ahash", "dhash", "phash",
+        }
+        # The tiny synthetic bytes are not a decodable image, so perceptual
+        # items may fail; content items still complete and persist.
+        assert _await_task(client, automatic["id"])["state"] in {"succeeded", "failed"}
+
+        # The preserved path stays flight-bound and the automatically refreshed
+        # hashes describe the replacement, not the stale file.
+        fresh = next(item for item in client.get("/api/v1/meta/map").json()["entries"] if item["virtual_path"] == path)
         assert fresh["crc32"] != old["crc32"] and fresh["sha256"] != old["sha256"]
+
+
+def test_explicit_rematch_rebinds_present_stable_object_and_enqueues_fingerprints(tmp_path, monkeypatch):
+    application = app(tmp_path, {"ticket.png": b"ticket", "replacement.png": b"replacement"})
+    with TestClient(application) as client:
+        client.post("/api/resources/reconcile")
+        path = _map_object(client, "inbox/ticket.png")
+        _flight(client, paperBoardingPassFrontResourcePath=path)
+        stored = _fingerprint(client, [path], ("crc32", "sha256"))
+        assert stored.status_code == 202
+        assert _await_task(client, stored.json()["task"]["id"])["state"] == "succeeded"
+        before = next(item for item in client.get("/api/v1/meta/map").json()["entries"] if item["virtual_path"] == path)
+        assert before["local_path"] == "ticket.png" and before["crc32"] and before["sha256"]
+
+        captured = []
+        monkeypatch.setattr(
+            application.state.background_tasks,
+            "enqueue_fingerprints",
+            lambda lifecycle, work: captured.append(work),
+        )
+        mapping = client.get("/api/v1/meta/map")
+        response = client.post("/api/resources/rematch", json={
+            "ifMatch": mapping.headers["etag"],
+            "mode": "explicit",
+            "matches": [{
+                "targetVirtualPath": path,
+                "candidateInboxVirtualPath": "inbox/replacement.png",
+            }],
+        })
+
+        assert response.status_code == 200
+        assert set(response.json()) == {"applied", "ambiguous", "unmatched", "revision"}
+        rebound = next(item for item in client.get("/api/v1/meta/map").json()["entries"] if item["virtual_path"] == path)
+        assert rebound == {
+            "virtual_path": path,
+            "local_path": "replacement.png",
+            "size_bytes": len(b"replacement"),
+        }
+        assert captured == [{path: ("crc32", "md5", "sha256", "ahash", "dhash", "phash")}]
 
 
 def test_fingerprints_reject_malformed_request_shapes_before_any_lookup(tmp_path):
     application = app(tmp_path)
     with TestClient(application) as client:
-        client.post("/api/resources/sync")
+        client.post("/api/resources/reconcile")
         lifecycle = application.state.resource_lifecycle
         calls: list[str] = []
-        original_hash = lifecycle._hash
+        original_hash = lifecycle.compute_rfg_hash
         async def observed_hash(local_path, algorithm):
             calls.append(local_path)
             return await original_hash(local_path, algorithm)
-        lifecycle._hash = observed_hash
+        lifecycle.compute_rfg_hash = observed_hash
 
         unmapped = "0" * 64 + ".png"
         assert _fingerprint(client, []).status_code == 422                       # below the 1..32 cap
@@ -123,18 +186,18 @@ def test_fingerprints_reject_malformed_request_shapes_before_any_lookup(tmp_path
 def test_fingerprints_reject_classified_reference_whose_source_left_the_catalog(tmp_path):
     application = app(tmp_path)
     with TestClient(application) as client:
-        client.post("/api/resources/sync")
+        client.post("/api/resources/reconcile")
         path = _map_object(client, "inbox/ticket.png")
         _flight(client, paperBoardingPassFrontResourcePath=path)
         (tmp_path / "resources" / "ticket.png").unlink()
 
         lifecycle = application.state.resource_lifecycle
         calls: list[str] = []
-        original_hash = lifecycle._hash
+        original_hash = lifecycle.compute_rfg_hash
         async def observed_hash(local_path, algorithm):
             calls.append(local_path)
             return await original_hash(local_path, algorithm)
-        lifecycle._hash = observed_hash
+        lifecycle.compute_rfg_hash = observed_hash
 
         # Mapped, classified and flight-bound, but the source file is gone:
         # rejected without touching RFG's hash API.
@@ -147,21 +210,27 @@ def test_fingerprints_reject_classified_reference_whose_source_left_the_catalog(
 def test_fingerprints_cover_every_direct_flight_object_field(tmp_path):
     application = app(tmp_path, {"front.png": b"front", "receipt.png": b"receipt", "pass.png": b"pass"})
     with TestClient(application) as client:
-        client.post("/api/resources/sync")
+        client.post("/api/resources/reconcile")
         front = _map_object(client, "inbox/front.png")
         attachment = _map_object(client, "inbox/receipt.png")
         electronic = _map_object(client, "inbox/pass.png")
 
         # Attachments referenced through attachmentResourcePaths are eligible.
         _flight(client, attachmentResourcePaths=[attachment])
-        assert _fingerprint(client, [attachment], ("md5",)).status_code == 200
+        attachment_fingerprint = _fingerprint(client, [attachment], ("md5",))
+        assert attachment_fingerprint.status_code == 202
+        assert _await_task(client, attachment_fingerprint.json()["task"]["id"])["state"] == "succeeded"
 
         # Object IDs have no resource-kind prefix. Any direct flight field is
         # therefore an eligible owner for an existing object mapping.
         _flight(client, paperBoardingPassFrontResourcePath=electronic, electronicBoardingPassResourcePath=front, attachmentResourcePaths=[front])
         for path in (front, electronic):
-            assert _fingerprint(client, [path]).status_code == 200
+            fingerprint = _fingerprint(client, [path])
+            assert fingerprint.status_code == 202
+            assert _await_task(client, fingerprint.json()["task"]["id"])["state"] == "succeeded"
 
         # Referenced through the correct fields, both become eligible.
         _flight(client, paperBoardingPassFrontResourcePath=front, electronicBoardingPassResourcePath=electronic)
-        assert _fingerprint(client, [front, electronic], ("crc32",)).status_code == 200
+        fingerprint = _fingerprint(client, [front, electronic], ("crc32",))
+        assert fingerprint.status_code == 202
+        assert _await_task(client, fingerprint.json()["task"]["id"])["state"] == "succeeded"

@@ -21,7 +21,7 @@ import { displayFlightNumber, displayName, unlistedCodeLabel } from '../utils/fo
 import { resourceUrl } from '../rfg/api';
 import { useTranslation, type TranslationKey } from '../i18n';
 import { ResourceImage } from '../resources/ResourceImage';
-import { isImageResource, leafName } from '../resources/resourcePicker';
+import { basename, isImageResource } from '../resources/resourcePaths';
 import { BoardingPassFrame, DEFAULT_FRAME_ASPECT } from '../boardingpass/BoardingPassFrame';
 import { BOARDING_PASS_SLOTS, slotLayout, slotResourcePath, type BoardingPassSlotKey } from '../boardingpass/passPresentation';
 import { airlineLabel, RouteConnector } from './flightDisplay';
@@ -70,7 +70,7 @@ function flightFileRows(flight: FlightRecord): FlightFileRow[] {
 /** Small row preview: images render their cached thumbnail, every non-image
  *  file shows the same centred generic file icon as the resource picker. */
 function FileRowPreview({ path }: { path: string }) {
-  if (isImageResource(path)) return <ResourceImage resourcePath={path} size={40} alt={leafName(path)} />;
+  if (isImageResource(path)) return <ResourceImage resourcePath={path} size={40} alt={basename(path)} />;
   return (
     <Box
       aria-hidden
@@ -365,7 +365,7 @@ export function FlightDetailDialog({
                   <FileRowPreview path={row.path} />
                   <Box sx={{ flex: '1 1 auto', minWidth: 0 }}>
                     <Typography variant="body2" noWrap title={row.path} sx={{ fontWeight: 600 }}>
-                      {leafName(row.path)}
+                      {basename(row.path)}
                     </Typography>
                     <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', mt: 0.25 }}>
                       {row.roles.map((role) => (
@@ -376,12 +376,12 @@ export function FlightDetailDialog({
                       ) : null}
                     </Box>
                   </Box>
-                  <Tooltip title={t('downloadFile', { name: leafName(row.path) })}>
+                  <Tooltip title={t('downloadFile', { name: basename(row.path) })}>
                     <IconButton
                       component="a"
                       href={resourceUrl(row.path)}
-                      download={leafName(row.path)}
-                      aria-label={t('downloadFile', { name: leafName(row.path) })}
+                      download={basename(row.path)}
+                      aria-label={t('downloadFile', { name: basename(row.path) })}
                       size="small"
                       sx={{ flex: '0 0 auto' }}
                     >

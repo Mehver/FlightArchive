@@ -70,7 +70,7 @@ def test_flight_resources_materialize_to_human_readable_names(tmp_path):
     files = {"front.png": b"f", "back.png": b"b", "pass.png": b"p", "a1.png": b"a1", "a2.png": b"a2"}
     application = app(tmp_path, files)
     with TestClient(application) as client:
-        client.post("/api/resources/sync")
+        client.post("/api/resources/reconcile")
         inbox = _inbox_entries(client)
         created = client.post(
             "/api/flights",
@@ -98,19 +98,18 @@ def test_airline_logos_materialize_to_human_readable_names(tmp_path):
     files = {"h.png": b"h", "hd.png": b"hd", "s.svg": b"<svg/>"}
     application = app(tmp_path, files)
     with TestClient(application) as client:
-        client.post("/api/resources/sync")
+        client.post("/api/resources/reconcile")
         inbox = _inbox_entries(client)
-        created = client.post(
-            "/api/catalogs/airlines",
+        created = client.put(
+            "/api/catalogs/airlines/CA",
             json={
-                "code": "CA",
                 "nameEn": "Air China",
                 "horizontalLogoResourcePath": inbox["h.png"],
                 "horizontalDarkLogoResourcePath": inbox["hd.png"],
                 "symbolLogoResourcePath": inbox["s.svg"],
             },
         )
-        assert created.status_code == 201
+        assert created.status_code == 200
         entry = created.json()["entry"]
         assert entry["horizontalLogoResourcePath"] == "ca-horizontal.png"
         assert entry["horizontalDarkLogoResourcePath"] == "ca-horizontal-dark.png"
@@ -120,7 +119,7 @@ def test_airline_logos_materialize_to_human_readable_names(tmp_path):
 def test_replacing_a_resource_disambiguates_the_new_source(tmp_path):
     application = app(tmp_path, {"old.png": b"old", "new.png": b"new"})
     with TestClient(application) as client:
-        client.post("/api/resources/sync")
+        client.post("/api/resources/reconcile")
         inbox = _inbox_entries(client)
         created = client.post(
             "/api/flights",
@@ -149,7 +148,7 @@ def test_replacing_a_resource_disambiguates_the_new_source(tmp_path):
 def test_existing_object_mappings_are_never_renamed(tmp_path):
     application = app(tmp_path)
     with TestClient(application) as client:
-        client.post("/api/resources/sync")
+        client.post("/api/resources/reconcile")
         mapping = client.get("/api/v1/meta/map")
         document = mapping.json()
         legacy = hashlib.sha256(b"ticket.png").hexdigest() + ".png"
@@ -174,15 +173,15 @@ def test_existing_object_mappings_are_never_renamed(tmp_path):
 def test_airline_logo_is_released_after_airline_deletion(tmp_path):
     application = app(tmp_path)
     with TestClient(application) as client:
-        client.post("/api/resources/sync")
+        client.post("/api/resources/reconcile")
         inbox = client.get("/api/v1/meta/map").json()["entries"][0]["virtual_path"]
-        created = client.post(
-            "/api/catalogs/airlines",
-            json={"code": "CA", "nameEn": "Air China", "horizontalLogoResourcePath": inbox},
+        created = client.put(
+            "/api/catalogs/airlines/CA",
+            json={"nameEn": "Air China", "horizontalLogoResourcePath": inbox},
         ).json()["entry"]
         assert created["horizontalLogoResourcePath"] == "ca-horizontal.png"
 
-        assert client.delete("/api/catalogs/airlines/CA").status_code == 200
+        assert client.post("/api/catalogs/airlines/delete", json={"keys": ["CA"]}).status_code == 200
         entries = client.get("/api/v1/meta/map").json()["entries"]
         assert any(e["virtual_path"] == "inbox/ticket.png" for e in entries)
         assert not any(e["virtual_path"] == "ca-horizontal.png" for e in entries)
@@ -191,18 +190,18 @@ def test_airline_logo_is_released_after_airline_deletion(tmp_path):
 def test_airline_logo_replacements_release_only_obsolete_slots(tmp_path):
     application = app(tmp_path, {"horizontal.png": b"h", "dark.png": b"d", "symbol.svg": b"<svg/>"})
     with TestClient(application) as client:
-        client.post("/api/resources/sync")
+        client.post("/api/resources/reconcile")
         inbox = _inbox_entries(client)
-        created = client.post(
-            "/api/catalogs/airlines",
+        created = client.put(
+            "/api/catalogs/airlines/CA",
             json={
-                "code": "CA", "nameEn": "Air China",
+                "nameEn": "Air China",
                 "horizontalLogoResourcePath": inbox["horizontal.png"],
                 "horizontalDarkLogoResourcePath": inbox["dark.png"],
                 "symbolLogoResourcePath": inbox["symbol.svg"],
             },
         )
-        assert created.status_code == 201
+        assert created.status_code == 200
 
         updated = client.put("/api/catalogs/airlines/CA", json={"symbolLogoResourcePath": None})
         assert updated.status_code == 200
@@ -217,22 +216,24 @@ def test_airline_logo_replacements_release_only_obsolete_slots(tmp_path):
         assert "ca-horizontal-dark.png" in entries
 
 
-def test_catalog_create_upsert_releases_replaced_airline_logo(tmp_path):
+def test_catalog_put_upsert_releases_replaced_airline_logo(tmp_path):
     application = app(tmp_path, {"first.png": b"first", "second.png": b"second"})
     with TestClient(application) as client:
-        client.post("/api/resources/sync")
+        client.post("/api/resources/reconcile")
         inbox = _inbox_entries(client)
-        first = client.post(
-            "/api/catalogs/airlines",
-            json={"code": "CA", "nameEn": "Air China", "horizontalLogoResourcePath": inbox["first.png"]},
+        first = client.put(
+            "/api/catalogs/airlines/CA",
+            json={"nameEn": "Air China", "alliance": "Star Alliance", "horizontalLogoResourcePath": inbox["first.png"]},
         )
-        assert first.status_code == 201
+        assert first.status_code == 200
 
-        second = client.post(
-            "/api/catalogs/airlines",
-            json={"code": "CA", "nameEn": "Air China", "horizontalLogoResourcePath": inbox["second.png"]},
+        second = client.put(
+            "/api/catalogs/airlines/%20CA%20",
+            json={"horizontalLogoResourcePath": inbox["second.png"]},
         )
-        assert second.status_code == 201
+        assert second.status_code == 200
+        assert second.json()["entry"]["nameEn"] == "Air China"
+        assert second.json()["entry"]["alliance"] == "Star Alliance"
         entries = {item["virtual_path"] for item in client.get("/api/v1/meta/map").json()["entries"]}
         assert "inbox/first.png" in entries
         assert second.json()["entry"]["horizontalLogoResourcePath"] in entries

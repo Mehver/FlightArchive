@@ -6,7 +6,7 @@ import { alpha } from '@mui/material/styles';
 
 export type { HexColor } from '../api/types';
 
-/** Internal sRGB triple used for pixel-level math (luminance, blending). */
+/** Internal sRGB triple used for pixel-level colour math. */
 export interface RgbColor {
   r: number;
   g: number;
@@ -22,7 +22,6 @@ export interface FlightVisualTheme {
 const DARK_SURFACE = '#1e1e1e';
 const LIGHT_SURFACE = '#ffffff';
 const TRANSPARENT = 'transparent';
-const BLACK_LUMINANCE_CUTOFF = 0.179;
 
 const HEX_COLOR_RE = /^#[0-9A-F]{6}$/;
 
@@ -53,35 +52,6 @@ export function hexToCss(color: HexColor): string {
   return rgb ? `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})` : TRANSPARENT;
 }
 
-/** Calculate WCAG relative luminance for a hex colour. */
-export function getLuminance(color: HexColor | RgbColor): number {
-  const rgb = typeof color === 'string' ? hexToRgb(color) : color;
-  if (!rgb) return 0;
-  const linear = (channel: number): number => {
-    const normalized = channel / 255;
-    return normalized <= 0.03928
-      ? normalized / 12.92
-      : Math.pow((normalized + 0.055) / 1.055, 2.4);
-  };
-  return 0.2126 * linear(rgb.r) + 0.7152 * linear(rgb.g) + 0.0722 * linear(rgb.b);
-}
-
-/** Calculate the WCAG contrast ratio between two colours. */
-export function getContrastRatio(color1: HexColor | RgbColor, color2: HexColor | RgbColor): number {
-  const luminance1 = getLuminance(color1);
-  const luminance2 = getLuminance(color2);
-  return (Math.max(luminance1, luminance2) + 0.05) / (Math.min(luminance1, luminance2) + 0.05);
-}
-
-export function isLightColor(color: HexColor | RgbColor): boolean {
-  return getLuminance(color) > 0.5;
-}
-
-/** Choose black or white text according to which has the greater WCAG contrast. */
-export function getReadableTextColor(background: HexColor | RgbColor): 'light' | 'dark' {
-  return getLuminance(background) > BLACK_LUMINANCE_CUTOFF ? 'dark' : 'light';
-}
-
 /**
  * Normalize optional API colours at the UI boundary so malformed persisted
  * values cannot enter CSS generation, even if a caller bypasses API validation.
@@ -97,18 +67,6 @@ export function buildFlightVisualTheme(
     airlineContrast: validOrNull(airline?.brandColors.contrast),
     flightColor: validOrNull(flight?.boardingPassColor),
   };
-}
-
-/** Prefer flight branding, then airline branding, before a mode-safe surface. */
-export function getThemeBackground(theme: FlightVisualTheme, isDarkMode: boolean): string {
-  const primary = theme.flightColor ?? theme.airlinePrimary;
-  return primary ? hexToCss(primary) : isDarkMode ? DARK_SURFACE : LIGHT_SURFACE;
-}
-
-/** Flight color is reused for its border; airline contrast remains its fallback. */
-export function getThemeBorder(theme: FlightVisualTheme): string {
-  const contrast = theme.flightColor ?? theme.airlineContrast;
-  return contrast ? hexToCss(contrast) : TRANSPARENT;
 }
 
 /** Linearly blend two colours. Values outside the interpolation range are clamped. */

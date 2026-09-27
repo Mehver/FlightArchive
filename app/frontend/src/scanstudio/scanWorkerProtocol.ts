@@ -53,10 +53,39 @@ export type ScanWorkerResponse =
 export function isScanWorkerResponse(value: unknown): value is ScanWorkerResponse {
   if (!value || typeof value !== 'object') return false;
   const message = value as Partial<ScanWorkerResponse> & Record<string, unknown>;
-  if (typeof message.id !== 'number' || typeof message.ok !== 'boolean') return false;
+  if (!isFiniteNumber(message.id) || typeof message.ok !== 'boolean') return false;
   if (!message.ok) {
     return (message.code === 'opencv-init-failed' || message.code === 'processing-failed') && typeof message.message === 'string';
   }
-  if (message.type === 'detect') return 'result' in message;
-  return message.type === 'crop' && message.blob instanceof Blob && typeof message.width === 'number' && typeof message.height === 'number';
+  if (message.type === 'detect') return message.result === null || isDetectionResult(message.result);
+  return message.type === 'crop'
+    && message.blob instanceof Blob
+    && isFiniteNumber(message.width)
+    && message.width > 0
+    && isFiniteNumber(message.height)
+    && message.height > 0;
+}
+
+function isDetectionResult(value: unknown): value is WorkerDetectionResult {
+  if (!value || typeof value !== 'object') return false;
+  const result = value as Partial<WorkerDetectionResult>;
+  return isPoint(result.center)
+    && isSize(result.size)
+    && isFiniteNumber(result.rotation);
+}
+
+function isPoint(value: unknown): value is WorkerDetectionResult['center'] {
+  if (!value || typeof value !== 'object') return false;
+  const point = value as Partial<WorkerDetectionResult['center']>;
+  return isFiniteNumber(point.x) && isFiniteNumber(point.y);
+}
+
+function isSize(value: unknown): value is WorkerDetectionResult['size'] {
+  if (!value || typeof value !== 'object') return false;
+  const size = value as Partial<WorkerDetectionResult['size']>;
+  return isFiniteNumber(size.width) && size.width > 0 && isFiniteNumber(size.height) && size.height > 0;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
 }

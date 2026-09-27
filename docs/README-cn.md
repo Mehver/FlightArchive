@@ -74,6 +74,12 @@ FlightArchive 提供响应式航班仪表盘、航班与航班参考目录（航
 docker build -f app/Dockerfile -t flightarchive:local app
 ```
 
+前端阶段需要从 npm registry 下载 `pnpm` 与依赖。若使用镜像站或处于受限网络，可通过 `NPM_REGISTRY` 构建参数指定可达的 registry：
+
+```shell
+docker build -f app/Dockerfile --build-arg NPM_REGISTRY=https://registry.npmmirror.com -t flightarchive:local app
+```
+
 **运行 Docker 镜像：**
 
 ```shell
@@ -103,6 +109,8 @@ Release assets 还包含可分别加载的 `linux/amd64` 与 `linux/arm64` Docke
 | `-v /path/for/cache:/cache` | 可选的可重建缩略图缓存 |
 
 容器启动后访问 http://localhost:8080。未挂载可选缓存时，`/cache` 保持为普通的可丢弃容器目录。
+
+“活动与任务”抽屉会统一显示仅限本次会话的操作反馈，以及按日志日期分组的后台任务历史；活动记录不会跨页面重载持久化。任务历史仅在抽屉打开时加载，首次读取最近三个实际存在的日志日期，下滑时继续读取更早日期，并且只在存在活动任务时轮询最新页。
 
 ---
 

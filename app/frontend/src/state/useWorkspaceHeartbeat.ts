@@ -2,13 +2,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { WorkspaceStatus } from '../api/types';
+import type { StatusResponse, WorkspaceStatus } from '../api/types';
 
 export type ConnectivityState = 'checking' | 'online' | 'offline';
-
-interface StatusResponse {
-  status: WorkspaceStatus;
-}
 
 export interface WorkspaceHeartbeat {
   connectivity: ConnectivityState;

@@ -37,27 +37,18 @@ export function calculateAutoFit(
   scaleMode: ScaleMode,
   alignment: Alignment,
 ): Placement {
+  void scaleMode;
   const aspect = crop.width / crop.height;
   const tplAspect = template.width / template.height;
   let w: number;
   let h: number;
 
-  if (scaleMode === 'long') {
-    if (aspect > tplAspect) {
-      w = template.width;
-      h = w / aspect;
-    } else {
-      h = template.height;
-      w = h * aspect;
-    }
+  if (aspect > tplAspect) {
+    w = template.width;
+    h = w / aspect;
   } else {
-    if (aspect > tplAspect) {
-      h = template.height;
-      w = h * aspect;
-    } else {
-      w = template.width;
-      h = w / aspect;
-    }
+    h = template.height;
+    w = h * aspect;
   }
 
   let cx = template.width / 2;

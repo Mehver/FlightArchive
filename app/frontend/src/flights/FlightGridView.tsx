@@ -7,10 +7,8 @@
  * flight number, and date.
  * Clicking a card opens the FlightDetailDialog (the detail card). */
 
-import { Box, IconButton, Paper, Tooltip, Typography } from '@mui/material';
+import { Box, Paper, Typography } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
-import DeleteIcon from '@mui/icons-material/Delete';
-import EditIcon from '@mui/icons-material/Edit';
 import type { Airport } from '../api/types';
 import { displayFlightNumber } from '../utils/format';
 import { useTranslation } from '../i18n';
@@ -25,7 +23,7 @@ import {
 import { AirlineLogo } from './AirlineLogo';
 import { buildFlightVisualTheme, createBlendedBackground } from '../theme/colors';
 
-export function FlightGridView({ flights, airlineNames, airlines, airports, onOpen, onEdit, onDelete, openLabel }: FlightViewProps) {
+export function FlightGridView({ flights, airlineNames, airlines, airports, onOpen, openLabel }: FlightViewProps) {
   const { t } = useTranslation();
   const muiTheme = useTheme();
   const labelFor = openLabel ?? ((flightNumber: string) => t('openFlightDetails', { flightNumber }));
@@ -114,40 +112,7 @@ export function FlightGridView({ flights, airlineNames, airlines, airports, onOp
               <Typography variant="caption" color="text.secondary" noWrap aria-label={`${airlineName}${flight.aircraftTypeIcao ? `, ${flight.aircraftTypeIcao}` : ''}${flight.seat ? `, seat ${flight.seat}` : ''}`}>
                 {airlineName}{flight.aircraftTypeIcao ? ` · ${flight.aircraftTypeIcao}` : ''}{flight.seat ? ` · ${flight.seat}` : ''}
               </Typography>
-              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', mt: 'auto', pt: 0.5 }}>
-                {onEdit || onDelete ? (
-                  <Box sx={{ display: 'flex', alignItems: 'center' }}>
-                    {onEdit ? (
-                      <Tooltip title={t('edit')}>
-                        <IconButton
-                          size="small"
-                          aria-label={t('editFlight', { flightNumber })}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onEdit(flight);
-                          }}
-                        >
-                          <EditIcon fontSize="small" />
-                        </IconButton>
-                      </Tooltip>
-                    ) : null}
-                    {onDelete ? (
-                      <Tooltip title={t('delete')}>
-                        <IconButton
-                          size="small"
-                          aria-label={t('deleteFlight', { flightNumber })}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onDelete(flight);
-                          }}
-                        >
-                          <DeleteIcon fontSize="small" />
-                        </IconButton>
-                      </Tooltip>
-                    ) : null}
-                  </Box>
-                ) : null}
-              </Box>
+              <Box sx={{ mt: 'auto', pt: 0.5 }} />
             </Box>
           </Paper>
         );

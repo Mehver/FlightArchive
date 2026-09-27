@@ -28,7 +28,6 @@ import { displayName } from '../utils/format';
 import { FlightDetailDialog } from './FlightDetailDialog';
 import { FlightListView } from './FlightListView';
 import { FlightGridView } from './FlightGridView';
-import { buildAirlineNames, buildAirlines, buildAirports } from './flightDisplay';
 import { useFlightViewMode, type FlightViewMode } from './flightViewPreference';
 import { useTranslation } from '../i18n';
 
@@ -57,9 +56,9 @@ export function FlightsPage() {
     return () => window.clearTimeout(handle);
   }, [load]);
 
-  const airlineNames = useMemo(() => buildAirlineNames(catalogs, t('notAvailable')), [catalogs, t]);
-  const airlines = useMemo(() => buildAirlines(catalogs), [catalogs]);
-  const airports = useMemo(() => buildAirports(catalogs), [catalogs]);
+  const airlineNames = useMemo(() => new Map((catalogs?.airlines ?? []).map((item) => [item.code, displayName(item.nameZh, item.nameEn, t('notAvailable'))])), [catalogs, t]);
+  const airlines = useMemo(() => new Map((catalogs?.airlines ?? []).map((item) => [item.code, item])), [catalogs]);
+  const airports = useMemo(() => new Map((catalogs?.airports ?? []).map((item) => [item.code, item])), [catalogs]);
 
   const viewProps = {
     flights: flights ?? [],

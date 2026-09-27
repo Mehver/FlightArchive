@@ -45,7 +45,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog';
 import { EmptyState, LoadingState } from '../components/States';
 import { displayFlightNumber, displayName, UNLISTED_REFERENCE_NOTE } from '../utils/format';
 import { useTranslation, type TranslationKey } from '../i18n';
-import { CatalogEntryDialog, catalogEntryKey, type CatalogEntry, type CatalogKind } from './CatalogEntryDialog';
+import { CatalogEntryDialog, catalogEntryKey, catalogEntryPayloadKey, type CatalogEntry, type CatalogKind } from './CatalogEntryDialog';
 import { isAircraftTypeIcao, isAirlineCode, isAirportCode } from '../flights/flightFormat';
 import { FlightDialog } from '../flights/FlightDialog';
 import { hexToCss } from '../theme/colors';
@@ -160,7 +160,7 @@ export function ReferenceLibraryPage() {
       const result = await api.listFlights();
       setFlights(result.flights);
     } catch (error) {
-      showError(error, t('failedToLoadFlights'));
+      showError(error, t('failedToLoadFlights'), { action: t('failedToLoadFlights'), form: t('flightReference') });
     } finally {
       setFlightsLoading(false);
     }
@@ -363,18 +363,20 @@ export function ReferenceLibraryPage() {
   const saveEntry = async (entry: Record<string, unknown>) => {
     setSaving(true);
     try {
+      const key = editing
+        ? catalogEntryKey(kind, editing.entry)
+        : catalogEntryPayloadKey(kind, entry);
+      await api.putCatalogEntry(kind, key, entry);
       if (editing) {
-        await api.updateCatalogEntry(kind, catalogEntryKey(kind, editing.entry), entry);
-        notify(t(editing.derived ? 'catalogEntryAdded' : 'catalogEntryUpdated'));
+        notify(t(editing.derived ? 'catalogEntryAdded' : 'catalogEntryUpdated'), 'success', { resource: catalogEntryKey(kind, editing.entry), form: t('flightReference') });
       } else {
-        await api.createCatalogEntry(kind, entry);
-        notify(t('catalogEntryAdded'));
+        notify(t('catalogEntryAdded'), 'success', { form: t('flightReference') });
       }
       setDialogOpen(false);
       setEditing(null);
       await refreshAll();
     } catch (error) {
-      showError(error, t('couldNotSaveCatalog'));
+      showError(error, t('couldNotSaveCatalog'), { action: t('save'), form: t('flightReference') });
     } finally {
       setSaving(false);
     }
@@ -383,8 +385,8 @@ export function ReferenceLibraryPage() {
   const deleteEntry = async (force = false) => {
     if (!deleting) return;
     try {
-      await api.deleteCatalogEntry(kind, catalogEntryKey(kind, deleting), force);
-      notify(t('catalogEntryDeleted', { key: catalogEntryKey(kind, deleting) }));
+      await api.deleteCatalogEntries(kind, [catalogEntryKey(kind, deleting)], force);
+      notify(t('catalogEntryDeleted', { key: catalogEntryKey(kind, deleting) }), 'success', { resource: catalogEntryKey(kind, deleting), form: t('flightReference') });
       setDeleting(null);
       setDeleteForce(false);
       await refreshAll();
@@ -392,7 +394,7 @@ export function ReferenceLibraryPage() {
       if (error instanceof ApiError && error.httpStatus === 409 && !force) {
         setDeleteForce(true);
       } else {
-        showError(error, t('couldNotDeleteCatalog'));
+        showError(error, t('couldNotDeleteCatalog'), { action: t('delete'), resource: catalogEntryKey(kind, deleting), form: t('flightReference') });
       }
     }
   };
@@ -405,7 +407,7 @@ export function ReferenceLibraryPage() {
     if (keys.length === 0) return;
     try {
       const result = await api.deleteCatalogEntries(kind, keys, force);
-      notify(t('catalogEntriesDeleted', { count: result.deleted.length }));
+      notify(t('catalogEntriesDeleted', { count: result.deleted.length }), 'success', { form: t('flightReference') });
       setSelected(new Set());
       setBulkDeleting(false);
       setBulkDeleteForce(false);
@@ -414,7 +416,7 @@ export function ReferenceLibraryPage() {
       if (error instanceof ApiError && error.httpStatus === 409 && !force) {
         setBulkDeleteForce(true);
       } else {
-        showError(error, t('couldNotDeleteCatalog'));
+        showError(error, t('couldNotDeleteCatalog'), { action: t('delete'), form: t('flightReference') });
       }
     }
   };
@@ -424,18 +426,18 @@ export function ReferenceLibraryPage() {
     try {
       if (editingFlight) {
         const updated = await api.updateFlight(editingFlight.id, payload);
-        notify(t('flightUpdated'));
+        notify(t('flightUpdated'), 'success', { resource: editingFlight.id, form: t('flightReference') });
         setEditingFlight(updated.flight);
         setFlights((current) => current.map((f) => f.id === updated.flight.id ? updated.flight : f));
       } else {
         const created = await api.createFlight(payload);
-        notify(t('flightAdded'));
+        notify(t('flightAdded'), 'success', { resource: created.flight.id, form: t('flightReference') });
         setEditingFlight(created.flight);
         setFlights((current) => [created.flight, ...current]);
       }
       await fetchFlights();
     } catch (error) {
-      showError(error, t('couldNotSaveFlight'));
+      showError(error, t('couldNotSaveFlight'), { action: t('save'), resource: editingFlight?.id, form: t('flightReference') });
     } finally {
       setSavingFlight(false);
     }
@@ -445,11 +447,11 @@ export function ReferenceLibraryPage() {
     if (!deletingFlight) return;
     try {
       await api.deleteFlight(deletingFlight.id);
-      notify(t('flightDeleted', { flightNumber: displayFlightNumber(deletingFlight.airlineCode, deletingFlight.flightNumber) }));
+      notify(t('flightDeleted', { flightNumber: displayFlightNumber(deletingFlight.airlineCode, deletingFlight.flightNumber) }), 'success', { resource: deletingFlight.id, form: t('flightReference') });
       setDeletingFlight(null);
       await fetchFlights();
     } catch (error) {
-      showError(error, t('couldNotDeleteFlight'));
+      showError(error, t('couldNotDeleteFlight'), { action: t('delete'), resource: deletingFlight.id, form: t('flightReference') });
     }
   };
 
@@ -462,12 +464,12 @@ export function ReferenceLibraryPage() {
         await api.deleteFlight(id);
         deletedCount++;
       }
-      notify(t('flightsDeleted', { count: deletedCount }));
+      notify(t('flightsDeleted', { count: deletedCount }), 'success', { form: t('flightReference') });
       setSelected(new Set());
       await fetchFlights();
     } catch (error) {
       await fetchFlights();
-      showError(error, t('couldNotDeleteFlight'));
+      showError(error, t('couldNotDeleteFlight'), { action: t('delete'), form: t('flightReference') });
     } finally {
       setBulkDeletingFlights(false);
     }

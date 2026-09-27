@@ -23,11 +23,6 @@ from typing import Any
 _HEX_COLOR_RE = re.compile(r"^#[0-9A-F]{6}$")
 
 
-def is_valid_hex_color(value: Any) -> bool:
-    """Return whether a value is a well-formed 6-digit uppercase hex colour."""
-    return isinstance(value, str) and bool(_HEX_COLOR_RE.match(value))
-
-
 def normalize_hex_color(value: Any) -> str | None:
     """Coerce a hex colour from untrusted JSON."""
     if isinstance(value, str):
@@ -68,10 +63,6 @@ def utc_now_iso() -> str:
 
 def new_id() -> str:
     return uuid.uuid4().hex
-
-
-def _is_str(value: Any) -> bool:
-    return isinstance(value, str)
 
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -133,25 +124,53 @@ def _str_list(value: Any, max_items: int = 64, max_len: int = 64) -> list[str]:
 
 
 def validate_resource_relation_payload(data: dict[str, Any], single_fields: tuple[str, ...], list_field: str | None = None) -> list[str]:
-    """Validate RFG virtual-resource paths before coercion."""
+    """Validate safe RFG paths before API materialization into stable objects."""
     issues: list[str] = []
     for field in single_fields:
         if field not in data:
             continue
         value = data[field]
-        if value is not None and (not isinstance(value, str) or not _resource_path(value)):
+        if value is not None and (not isinstance(value, str) or not _safe_resource_path(value)):
             issues.append(f"{field} must be null or a safe RFG virtual path")
     if list_field and list_field in data:
         value = data[list_field]
         if not isinstance(value, list) or len(value) > 32:
             issues.append(f"{list_field} must be an array of at most 32 resource paths")
-        elif any(not isinstance(item, str) or not _resource_path(item) for item in value):
+        elif any(not isinstance(item, str) or not _safe_resource_path(item) for item in value):
             issues.append(f"{list_field} entries must be safe RFG virtual paths")
     return issues
 
 
-def _resource_path(value: str) -> bool:
+def validate_resource_reference(value: str) -> bool:
+    """Return whether a persisted resource reference has a safe path shape."""
+    return _safe_resource_path(value)
+
+
+def _safe_resource_path(value: str) -> bool:
     return bool(value and len(value) <= 512 and "\\" not in value and "\x00" not in value and not value.startswith("/") and all(part not in {"", ".", ".."} for part in value.split("/")))
+
+
+def validate_persisted_resource_paths(data: dict[str, Any]) -> list[str]:
+    """Reject temporary RFG namespaces from persisted domain relations."""
+    issues: list[str] = []
+    fields = (
+        "horizontalLogoResourcePath",
+        "horizontalDarkLogoResourcePath",
+        "symbolLogoResourcePath",
+        "paperBoardingPassFrontResourcePath",
+        "paperBoardingPassBackResourcePath",
+        "electronicBoardingPassResourcePath",
+    )
+    for field in fields:
+        value = data.get(field)
+        if isinstance(value, str) and value.startswith(("inbox/", "ignore/")):
+            issues.append(f"{field} must reference a stable RFG object")
+    attachments = data.get("attachmentResourcePaths")
+    if isinstance(attachments, list) and any(
+        isinstance(value, str) and value.startswith(("inbox/", "ignore/")) for value in attachments
+    ):
+        issues.append("attachmentResourcePaths entries must reference stable RFG objects")
+    return issues
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +243,7 @@ class Airline:
             ("horizontalDarkLogoResourcePath", self.horizontalDarkLogoResourcePath),
             ("symbolLogoResourcePath", self.symbolLogoResourcePath),
         ):
-            if value is not None and not _resource_path(value):
+            if value is not None and not validate_resource_reference(value):
                 issues.append(f"airline.{field} must be a safe RFG virtual path")
         issues.extend(validate_optional_hex_color(self.brandColors["primary"], "airline.brandColors.primary"))
         issues.extend(validate_optional_hex_color(self.brandColors["contrast"], "airline.brandColors.contrast"))
@@ -410,7 +429,7 @@ def validate_paper_boarding_pass_layouts(value: Any, flight: dict[str, Any]) -> 
         unknown = set(config) - allowed
         if unknown:
             issues.append(f"{prefix} has unknown fields: {', '.join(sorted(unknown))}")
-        if config.get("schemaVersion") != 1:
+        if type(config.get("schemaVersion")) is not int or config.get("schemaVersion") != 1:
             issues.append(f"{prefix}.schemaVersion must be 1")
         if config.get("algorithm") not in ("adaptive", "canny", "sobel", "laplacian"):
             issues.append(f"{prefix}.algorithm is invalid")
@@ -452,7 +471,7 @@ def validate_electronic_boarding_pass(value: Any, flight: dict[str, Any]) -> lis
     unknown = set(value) - {"schemaVersion", "extraction"}
     if unknown:
         issues.append(f"has unknown fields: {', '.join(sorted(unknown))}")
-    if value.get("schemaVersion") != 1 or isinstance(value.get("schemaVersion"), bool):
+    if type(value.get("schemaVersion")) is not int or value.get("schemaVersion") != 1:
         issues.append("schemaVersion must be 1")
     if not flight.get("electronicBoardingPassResourcePath"):
         issues.append("requires electronicBoardingPassResourcePath")
@@ -612,9 +631,9 @@ class FlightRecord:
             ("paperBoardingPassBackResourcePath", self.paperBoardingPassBackResourcePath),
             ("electronicBoardingPassResourcePath", self.electronicBoardingPassResourcePath),
         ):
-            if value is not None and not _resource_path(value):
+            if value is not None and not validate_resource_reference(value):
                 issues.append(f"flight.{field} must be a safe RFG virtual path")
-        if any(not _resource_path(value) for value in self.attachmentResourcePaths):
+        if any(not validate_resource_reference(value) for value in self.attachmentResourcePaths):
             issues.append("flight.attachmentResourcePaths entries must be safe RFG virtual paths")
         issues.extend(validate_optional_hex_color(self.boardingPassColor, "flight.boardingPassColor"))
         if include_boarding_pass_layouts:

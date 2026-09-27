@@ -35,7 +35,7 @@ import { buildTheme } from './theme';
 import { FlightsPage } from './flights/FlightsPage';
 import { ReferenceLibraryPage } from './reference/ReferenceLibraryPage';
 import { ResourceMappingsPage } from './resources/ResourceMappingsPage';
-import { TasksPage } from './tasks/TasksPage';
+import { FeedbackDrawer } from './tasks/FeedbackDrawer';
 import { useTranslation } from './i18n';
 
 const DRAWER_WIDTH = 232;
@@ -135,8 +135,8 @@ function Shell() {
                 {connectivity === 'online' ? <CloudDoneOutlinedIcon /> : connectivity === 'offline' ? <CloudOffOutlinedIcon /> : <SyncOutlinedIcon />}
               </IconButton>
             </Tooltip>
-            <Tooltip title={t('tasks')}>
-              <IconButton aria-label={t('tasks')} onClick={() => setTasksOpen(true)}>
+            <Tooltip title={t('feedbackCenter')}>
+              <IconButton aria-label={t('feedbackCenter')} onClick={() => setTasksOpen(true)}>
                 <NotificationsOutlinedIcon />
               </IconButton>
             </Tooltip>
@@ -189,16 +189,7 @@ function Shell() {
           </Drawer>
         )}
 
-        <Drawer
-          anchor="right"
-          open={tasksOpen}
-          onClose={() => setTasksOpen(false)}
-          slotProps={{ paper: { sx: { width: { xs: '100%', sm: 520 }, maxWidth: '100%' } } }}
-        >
-          <Box sx={{ p: { xs: 2, sm: 2.5 }, minHeight: '100%' }}>
-            <TasksPage onClose={() => setTasksOpen(false)} />
-          </Box>
-        </Drawer>
+        <FeedbackDrawer open={tasksOpen} onClose={() => setTasksOpen(false)} />
 
         <Box
           component="main"

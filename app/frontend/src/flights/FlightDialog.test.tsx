@@ -112,7 +112,6 @@ describe('FlightDialog submission validation', () => {
     expect(onSave).not.toHaveBeenCalled();
     expect(screen.getByRole('combobox', { name: 'Origin Airport' }).getAttribute('aria-invalid')).toBe('true');
     expect(screen.getByRole('combobox', { name: 'Destination Airport' }).getAttribute('aria-invalid')).toBe('true');
-    expect(screen.queryByText('This field is required')).toBeNull();
   });
 
   it('submits flight data without the retired status attribute', () => {
@@ -152,7 +151,6 @@ describe('FlightDialog submission validation', () => {
     fireEvent.change(registration, { target: { value: 'n--123' } });
     expect(registration.value).toBe('N--123');
     expect(registration.getAttribute('aria-invalid')).toBe('true');
-    expect(screen.queryByText('2–16 letters or digits; hyphens only between characters')).toBeNull();
   });
 
   it('disables terminals until their airport is entered while retaining their labels', () => {
@@ -163,7 +161,6 @@ describe('FlightDialog submission validation', () => {
     );
     expect((screen.getByRole('combobox', { name: 'Departure Terminal' }) as HTMLInputElement).disabled).toBe(true);
     expect((screen.getByRole('combobox', { name: 'Arrival Terminal' }) as HTMLInputElement).disabled).toBe(true);
-    expect(screen.queryByText('Enter an airport code first')).toBeNull();
   });
 
   it('derives naturally sorted, deduplicated terminal suggestions only for the selected airport', () => {

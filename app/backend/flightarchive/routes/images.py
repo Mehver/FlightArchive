@@ -17,7 +17,7 @@ import asyncio
 from fastapi import APIRouter, Request, Response
 
 from ..thumbnails import ThumbnailStore, UnsupportedImageError
-from .api import ApiError
+from .api import ApiError, etag_matches_if_none_match
 
 router = APIRouter()
 
@@ -55,7 +55,7 @@ async def image(request: Request, virtual_path: str) -> Response:
     # The id is the SHA-256 of the WebP bytes, so it is a strong validator.
     etag = f'"{thumbnail.id}"'
     headers = {"ETag": etag, "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"}
-    if request.headers.get("if-none-match") == etag:
+    if etag_matches_if_none_match(request.headers.get("if-none-match"), etag):
         return Response(status_code=304, headers=headers)
     headers["Content-Length"] = str(len(thumbnail.data))
     if request.method == "HEAD":

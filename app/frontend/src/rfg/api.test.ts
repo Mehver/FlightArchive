@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { HASH_ALGORITHMS, imageUrl, PERCEPTUAL_ALGORITHMS, resourceUrl, rfg } from './api';
+import { HASH_ALGORITHMS, imageUrl, PERCEPTUAL_ALGORITHMS, resourceUrl } from './api';
 
 describe('resourceUrl / imageUrl', () => {
   it('routes originals through /res/ and thumbnails through /images/', () => {
@@ -32,10 +32,6 @@ describe('resourceUrl / imageUrl', () => {
     expect(resourceUrl('inbox/a?b#c.png')).toBe('/res/inbox/a%3Fb%23c.png');
   });
 
-  it('exposes the same builders on the rfg client facade', () => {
-    expect(rfg.resourceUrl).toBe(resourceUrl);
-    expect(rfg.imageUrl).toBe(imageUrl);
-  });
 });
 
 describe('hash algorithm constants', () => {

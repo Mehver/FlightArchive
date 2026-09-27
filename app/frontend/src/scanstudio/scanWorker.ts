@@ -90,7 +90,7 @@ function canvasFor(image: ImageBitmap): OffscreenCanvas {
 }
 
 async function crop(image: ImageBitmap, crop: { centerX: number; centerY: number; width: number; height: number; rotationDegrees: number }) {
-  if (!Number.isFinite(crop.width) || !Number.isFinite(crop.height) || crop.width <= 0 || crop.height <= 0) throw new Error('invalid-crop-rectangle');
+  if (!Number.isFinite(crop.width) || !Number.isFinite(crop.height) || crop.width <= 0 || crop.height <= 0 || !Number.isFinite(crop.rotationDegrees)) throw new Error('invalid-crop-rectangle');
   const Canvas = typeof OffscreenCanvas === 'undefined' ? undefined : OffscreenCanvas;
   if (!Canvas) throw new Error('offscreen-canvas-unavailable');
   const width = Math.max(1, Math.round(crop.width));
@@ -134,6 +134,6 @@ scope.onmessage = async (event: MessageEvent<ScanWorkerRequest>) => {
     const code = classifyWorkerError(error);
     scope.postMessage({ id: request.id, ok: false, code, message } satisfies ScanWorkerResponse);
   } finally {
-    request.image.close();
+    request?.image?.close?.();
   }
 };

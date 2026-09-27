@@ -49,18 +49,14 @@ import { ScanWorkerClient } from './scanWorkerClient';
 import { DETECTION_ALGORITHMS, type DetectionAlgorithm } from './scanWorkerProtocol';
 import { templateById, templatesForSide, type BoardingPassSide, type BoardingPassTemplate } from './templates';
 import {
-  QUAD_EDGES,
   clamp,
   defaultQuad,
   isUsableQuad,
   isQuadWithinBounds,
   normalizeQuadGeometry,
-  quadCenter,
   quadEdgeLength,
   rectFromQuad,
   rectToQuad,
-  rotationHandlePoint,
-  type Point,
   type Quad,
   type QuadBounds,
 } from './cropGeometry';
@@ -107,12 +103,6 @@ interface CroppedImage {
   height: number;
   element: HTMLImageElement;
 }
-
-const ROTATION_HANDLE_OFFSET_PX = 28;
-const ROTATION_HANDLE_HIT_PX = 22;
-const CROP_CANVAS_PADDING_PX = ROTATION_HANDLE_OFFSET_PX + ROTATION_HANDLE_HIT_PX + 8;
-export const MAGNIFIER_SIZE = 560;
-type QuadGesture = { kind: 'vertex' | 'edge' | 'move'; index: number } | { kind: 'rotate'; index: number; deltaDeg: number };
 
 function num(value: string, fallback: number): number {
   const parsed = Number.parseFloat(value);
@@ -164,7 +154,6 @@ export function PaperBoardingPassStudio({
   const [cropDirty, setCropDirty] = useState(true);
   const [magnification, setMagnification] = useState(2);
   const [magnifierEnabled, setMagnifierEnabled] = useState(true);
-  const [magnifierPoint] = useState<Point | null>(null);
   const [cropping, setCropping] = useState(false);
   const [cropped, setCropped] = useState<CroppedImage | null>(null);
   const [templateId, setTemplateId] = useState<string>(existingLayout?.templateId ?? templates[0].id);
@@ -176,10 +165,7 @@ export function PaperBoardingPassStudio({
   // Stage 2: placement transform of the rectified crop (rotation starts at 0).
   const [place, setPlace] = useState<Placement>({ cx: 0, cy: 0, w: 0, h: 0, rotationDegrees: 0 });
   const [saving, setSaving] = useState(false);
-  const [gesture] = useState<QuadGesture | null>(null);
 
-  const cropCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const magnifierCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const placeCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const placeDragRef = useRef<{ type: 'move' | 'corner'; startX: number; startY: number; orig: Placement } | null>(null);
   const workerRef = useRef<ScanWorkerClient | null>(null);
@@ -291,184 +277,11 @@ export function PaperBoardingPassStudio({
     return () => { cancelled = true; };
   }, [template]);
 
-  // ---- stage 1 canvas geometry ----
-  const cropScale = useMemo(() => {
-    if (!image) return 1;
-    const panelWidth = 760;
-    return Math.min(1, panelWidth / image.naturalWidth);
-  }, [image]);
-
-  const imgToCanvas = useCallback(
-    (p: Point) => {
-      if (!image) return p;
-      const canvas = cropCanvasRef.current;
-      return {
-        x: (p.x - image.naturalWidth / 2) * cropScale + (canvas?.width ?? 0) / 2,
-        y: (p.y - image.naturalHeight / 2) * cropScale + (canvas?.height ?? 0) / 2,
-      };
-    },
-    [image, cropScale],
-  );
   /** Apply a Stage 1 edit and mark the upright crop stale. */
   const updateQuad = (next: Quad) => {
     setQuad(next);
     setCropDirty(true);
   };
-
-  // ---- stage 1 canvas rendering: rotated rectangle and edit handles ----
-  useEffect(() => {
-    const canvas = cropCanvasRef.current;
-    if (!canvas || !image) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    const w = image.naturalWidth * cropScale;
-    const h = image.naturalHeight * cropScale;
-    // The padded backing canvas keeps the external rotation handle visible even
-    // when the crop rectangle reaches a source-image edge.
-    canvas.width = Math.max(320, w + CROP_CANVAS_PADDING_PX * 2);
-    canvas.height = Math.max(200, h + CROP_CANVAS_PADDING_PX * 2);
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    const topLeft = imgToCanvas({ x: 0, y: 0 });
-    ctx.drawImage(image, topLeft.x, topLeft.y, w, h);
-    if (!quad) return;
-    const corners = quad.map(imgToCanvas) as Quad;
-    // Dashed rectangle outline (bright underlay + dark dashes for contrast).
-    ctx.beginPath();
-    corners.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
-    ctx.closePath();
-    ctx.strokeStyle = '#ffeb3b';
-    ctx.lineWidth = 2.5;
-    ctx.stroke();
-    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4, 3]);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    // Edge handles: squares at edge midpoints; the active edge is highlighted.
-    for (let edge = 0; edge < 4; edge++) {
-      const [a, b] = QUAD_EDGES[edge];
-      const midX = (corners[a].x + corners[b].x) / 2;
-      const midY = (corners[a].y + corners[b].y) / 2;
-      const active = gesture?.kind === 'edge' && gesture.index === edge;
-      ctx.save();
-      ctx.translate(midX, midY);
-      ctx.rotate(Math.atan2(corners[b].y - corners[a].y, corners[b].x - corners[a].x));
-      ctx.beginPath();
-      ctx.rect(-6, -6, 12, 12);
-      ctx.fillStyle = active ? '#ffeb3b' : 'rgba(255,255,255,0.9)';
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(0,0,0,0.75)';
-      ctx.lineWidth = 1.2;
-      ctx.stroke();
-      ctx.restore();
-    }
-    // Visible external rotation handle: it follows the top edge and remains
-    // inside the padded canvas rather than relying on a hidden hold gesture.
-    const rotationHandle = rotationHandlePoint(corners, ROTATION_HANDLE_OFFSET_PX);
-    const topMidpoint = { x: (corners[0].x + corners[1].x) / 2, y: (corners[0].y + corners[1].y) / 2 };
-    const rotating = gesture?.kind === 'rotate';
-    ctx.beginPath();
-    ctx.moveTo(topMidpoint.x, topMidpoint.y);
-    ctx.lineTo(rotationHandle.x, rotationHandle.y);
-    ctx.strokeStyle = '#ffeb3b';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(rotationHandle.x, rotationHandle.y, rotating ? 8 : 7, 0, Math.PI * 2);
-    ctx.fillStyle = rotating ? '#ffeb3b' : 'rgba(255,255,255,0.95)';
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-    // Corner handles.
-    const colors = ['#f44336', '#00bcd4', '#ff9800', '#e040fb'];
-    corners.forEach((p, i) => {
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
-      ctx.fillStyle = colors[i];
-      ctx.fill();
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-    });
-    // Rotation state: pivot dot, orbit guide and a live angle badge.
-    if (gesture?.kind === 'rotate') {
-      const centre = imgToCanvas(quadCenter(quad));
-      const held = rotationHandle;
-      ctx.beginPath();
-      ctx.arc(centre.x, centre.y, Math.hypot(held.x - centre.x, held.y - centre.y), 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(255,235,59,0.6)';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([6, 4]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.beginPath();
-      ctx.arc(centre.x, centre.y, 4, 0, Math.PI * 2);
-      ctx.fillStyle = '#ffeb3b';
-      ctx.fill();
-      const label = `${gesture.deltaDeg >= 0 ? '+' : ''}${gesture.deltaDeg.toFixed(1)}°`;
-      ctx.font = '12px sans-serif';
-      const labelWidth = ctx.measureText(label).width + 10;
-      ctx.fillStyle = 'rgba(0,0,0,0.75)';
-      ctx.fillRect(centre.x + 10, centre.y - 24, labelWidth, 18);
-      ctx.fillStyle = '#ffeb3b';
-      ctx.fillText(label, centre.x + 15, centre.y - 11);
-    }
-    // `stage` re-runs this effect when the canvas is (re)mounted after
-    // navigating back to the crop stage, so an existing layout's frame is
-    // drawn and the canvas backing size is correct for hit-testing.
-  }, [image, quad, cropScale, imgToCanvas, gesture, stage, magnifierPoint]);
-
-  // Independent pixel magnifier retained for the legacy renderer path.
-  useEffect(() => {
-    const canvas = magnifierCanvasRef.current;
-    if (!canvas) return;
-    if (!image || !magnifierPoint) {
-      canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
-      return;
-    }
-    canvas.width = MAGNIFIER_SIZE; canvas.height = MAGNIFIER_SIZE;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    // A tiny source cannot fill the requested sampling square. Sample its
-    // shortest side instead so the magnifier remains fully populated.
-    const sourceSize = Math.min(canvas.width / magnification, image.naturalWidth, image.naturalHeight);
-    const sx = clamp(magnifierPoint.x - sourceSize / 2, 0, Math.max(0, image.naturalWidth - sourceSize));
-    const sy = clamp(magnifierPoint.y - sourceSize / 2, 0, Math.max(0, image.naturalHeight - sourceSize));
-    const magnifierScale = canvas.width / sourceSize;
-    // Map a source-image coordinate into the magnifier viewport.
-    const toMagnifier = (p: Point): Point => ({ x: (p.x - sx) * magnifierScale, y: (p.y - sy) * magnifierScale });
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(image, sx, sy, sourceSize, sourceSize, 0, 0, canvas.width, canvas.height);
-    if (quad) {
-      const corners = quad.map(toMagnifier) as Quad;
-      // Dashed rectangle outline (bright underlay + dark dashes for contrast),
-      // matching the main crop overlay. Corners outside the viewport are
-      // clipped naturally by the canvas.
-      ctx.beginPath();
-      corners.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
-      ctx.closePath();
-      ctx.strokeStyle = '#ffeb3b';
-      ctx.lineWidth = 5;
-      ctx.stroke();
-      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 3]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      // Corner handles coloured to match the main overlay.
-      const colors = ['#f44336', '#00bcd4', '#ff9800', '#e040fb'];
-      corners.forEach((p, i) => {
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
-        ctx.fillStyle = colors[i];
-        ctx.fill();
-        ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 1.2;
-        ctx.stroke();
-      });
-    }
-  }, [image, magnifierPoint, magnification, quad]);
 
   // ---- stage 1 pointer interaction (Pointer Events: mouse + touch) ----
   const canvasPoint = (canvas: HTMLCanvasElement, e: { clientX: number; clientY: number }) => {
@@ -725,7 +538,7 @@ export function PaperBoardingPassStudio({
     const canvas = e.currentTarget;
     const scale = canvas.width / template.width;
     const point = canvasPoint(canvas, e);
-    const sp = { x: point.x / scale, y: point.y / scale };
+    const templatePoint = { x: point.x / scale, y: point.y / scale };
     const r = (place.rotationDegrees * Math.PI) / 180;
     const corners = [
       { dx: -place.w / 2, dy: -place.h / 2 },
@@ -734,20 +547,20 @@ export function PaperBoardingPassStudio({
       { dx: -place.w / 2, dy: place.h / 2 },
     ].map((c) => ({ x: place.cx + c.dx * Math.cos(r) - c.dy * Math.sin(r), y: place.cy + c.dx * Math.sin(r) + c.dy * Math.cos(r) }));
     for (const corner of corners) {
-      if (Math.hypot(sp.x - corner.x, sp.y - corner.y) < (12 * canvasHitScale(canvas)) / scale) {
+      if (Math.hypot(templatePoint.x - corner.x, templatePoint.y - corner.y) < (12 * canvasHitScale(canvas)) / scale) {
         canvas.setPointerCapture(e.pointerId);
-        placeDragRef.current = { type: 'corner', startX: sp.x, startY: sp.y, orig: place };
+        placeDragRef.current = { type: 'corner', startX: templatePoint.x, startY: templatePoint.y, orig: place };
         return;
       }
     }
     const rr = (-place.rotationDegrees * Math.PI) / 180;
-    const dx = sp.x - place.cx;
-    const dy = sp.y - place.cy;
+    const dx = templatePoint.x - place.cx;
+    const dy = templatePoint.y - place.cy;
     const rx = dx * Math.cos(rr) - dy * Math.sin(rr);
     const ry = dx * Math.sin(rr) + dy * Math.cos(rr);
     if (Math.abs(rx) <= place.w / 2 + 2 && Math.abs(ry) <= place.h / 2 + 2) {
       canvas.setPointerCapture(e.pointerId);
-      placeDragRef.current = { type: 'move', startX: sp.x, startY: sp.y, orig: place };
+      placeDragRef.current = { type: 'move', startX: templatePoint.x, startY: templatePoint.y, orig: place };
     }
   };
 
@@ -757,11 +570,11 @@ export function PaperBoardingPassStudio({
     const canvas = e.currentTarget;
     const scale = canvas.width / template.width;
     const point = canvasPoint(canvas, e);
-    const sp = { x: point.x / scale, y: point.y / scale };
+    const templatePoint = { x: point.x / scale, y: point.y / scale };
     if (drag.type === 'move') {
-      setPlace({ ...drag.orig, cx: drag.orig.cx + (sp.x - drag.startX), cy: drag.orig.cy + (sp.y - drag.startY) });
+      setPlace({ ...drag.orig, cx: drag.orig.cx + (templatePoint.x - drag.startX), cy: drag.orig.cy + (templatePoint.y - drag.startY) });
     } else {
-      const dist = Math.max(4, Math.hypot(sp.x - drag.orig.cx, sp.y - drag.orig.cy) * 2);
+      const dist = Math.max(4, Math.hypot(templatePoint.x - drag.orig.cx, templatePoint.y - drag.orig.cy) * 2);
       const w = clamp(dist, 4, template.width * 4);
       setPlace({ ...drag.orig, w, h: w / croppedAspect });
     }
@@ -798,11 +611,11 @@ export function PaperBoardingPassStudio({
       const paperLayouts = { ...(flight.paperBoardingPassLayouts ?? {}) };
       paperLayouts[slot as 'paperBoardingPassFront' | 'paperBoardingPassBack'] = layout;
       const result = await api.updateFlight(flight.id, { paperBoardingPassLayouts: paperLayouts });
-      notify(t('studioSaved'));
+      notify(t('studioSaved'), 'success', { action: t('studioSave'), form: t('scanStudioTitle', { slot: t(SLOT_LABEL_KEY[slot]) }) });
       onSaved(result.flight);
       onClose();
     } catch (error) {
-      showError(error, t('studioSaveFailed'));
+      showError(error, t('studioSaveFailed'), { action: t('studioSave'), form: t('scanStudioTitle', { slot: t(SLOT_LABEL_KEY[slot]) }) });
     } finally {
       setSaving(false);
     }
@@ -814,11 +627,11 @@ export function PaperBoardingPassStudio({
       const paperLayouts = { ...(flight.paperBoardingPassLayouts ?? {}) };
       delete paperLayouts[slot as 'paperBoardingPassFront' | 'paperBoardingPassBack'];
       const result = await api.updateFlight(flight.id, { paperBoardingPassLayouts: paperLayouts });
-      notify(t('studioLayoutCleared'));
+      notify(t('studioLayoutCleared'), 'success', { action: t('studioClearLayout'), form: t('scanStudioTitle', { slot: t(SLOT_LABEL_KEY[slot]) }) });
       onSaved(result.flight);
       onClose();
     } catch (error) {
-      showError(error, t('studioSaveFailed'));
+      showError(error, t('studioSaveFailed'), { action: t('studioClearLayout'), form: t('scanStudioTitle', { slot: t(SLOT_LABEL_KEY[slot]) }) });
     } finally {
       setSaving(false);
     }
@@ -942,12 +755,6 @@ export function PaperBoardingPassStudio({
                 <Typography variant="caption" color="text.secondary">
                   {t('studioCropHint')}
                 </Typography>
-                {gesture?.kind === 'rotate' ? (
-                  <Typography variant="caption" color="primary" role="status">
-                    {t('studioRotateActive', { degrees: gesture.deltaDeg.toFixed(1) })}
-                  </Typography>
-                ) : null}
-
                 <Box sx={{ display: 'flex', gap: 2, minWidth: 0, minHeight: 0, flex: '1 1 auto', overflow: 'hidden' }}>
                   <Box sx={{ flex: '1 1 auto', boxSizing: 'border-box', position: 'relative', overflow: 'hidden', minHeight: 300, border: 1, borderColor: 'divider', borderRadius: 1, p: 1, bgcolor: 'action.hover' }}>
                     {image && cropRect ? (

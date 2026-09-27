@@ -3,7 +3,7 @@
 
 /** API DTO types mirroring the backend JSON payloads. */
 
-import type { HashAlgorithm, MappingDocument } from '../rfg/api';
+import type { HashAlgorithm } from '../rfg/api';
 
 export interface FlightRecord {
   id: string;
@@ -129,54 +129,76 @@ export interface WorkspaceStatus {
   counts: StatusCounts;
 }
 
+export interface StatusResponse {
+  status: WorkspaceStatus;
+}
+
+export interface CatalogDeleteRequest {
+  keys: string[];
+  force?: boolean;
+}
+
+export interface CatalogDeleteResponse {
+  deleted: string[];
+}
+
 
 // ---- resource mappings ----
 
-/** One file in RFG's current local catalog (GET /api/resources/catalog). */
-export interface ResourceLocalFile {
-  local_path: string;
-  size_bytes?: number | null;
+export type ResourceReviewState = 'mapped' | 'pending' | 'ignored' | 'missing' | 'local_only';
+
+export type ResourceUse =
+  | { kind: 'flight'; id: string; airlineCode: string; flightNumber: string; departureDate: string; role: 'paperBoardingPassFront' | 'paperBoardingPassBack' | 'electronicBoardingPass' | 'attachment' }
+  | { kind: 'airline'; code: string; role: 'horizontal' | 'horizontal-dark' | 'symbol' };
+
+export interface ResourceReviewCapabilities {
+  ignore: boolean;
+  unignore: boolean;
+  release: boolean;
+  fingerprint: boolean;
+  rematchTarget: boolean;
+  rematchCandidate: boolean;
 }
 
-/**
- * One retained rematch: keep the existing object-ID target virtual path
- * and replace its missing local source with a new inbox candidate's file.
- * Virtual paths are never edited or re-planned by this operation.
- */
-export interface ResourceRematch {
-  targetVirtualPath: string;
-  candidateInboxVirtualPath: string;
+/** Backend-authoritative mapping/catalog/business-use projection. */
+export interface ResourceReviewRow {
+  virtualPath: string | null;
+  localPath: string;
+  state: ResourceReviewState;
+  present: boolean;
+  sizeBytes: number | null;
+  fingerprints: HashAlgorithm[];
+  uses: ResourceUse[];
+  capabilities: ResourceReviewCapabilities;
 }
 
-export interface ResourceRematchesRequest {
-  /** ETag captured when the reviewed mapping was read; null when RFG sent none. */
-  ifMatch: string | null;
-  matches: ResourceRematch[];
-}
-
-/**
- * Response concept for POST /api/resources/rematches: the refreshed mapping
- * document, refreshed local catalog, and the new mapping ETag. The page
- * still reloads through the read routes after applying, so consumers do not
- * depend on this body's exact shape while the endpoint is finalized.
- */
-export interface ResourceRematchesResponse {
-  applied: number;
-  mapping: MappingDocument;
-  localFiles: ResourceLocalFile[];
-  etag: string | null;
+export interface ResourceReviewSnapshot {
+  /** Current RFG mapping ETag, required by reviewed mutations. */
+  revision: string;
+  rows: ResourceReviewRow[];
 }
 
 export interface ResourceIgnoreRequest {
   ifMatch: string | null;
-  virtualPath: string;
+  virtualPaths: string[];
 }
 
 export interface ResourceIgnoreResponse {
-  ignoredVirtualPath: string;
-  mapping: MappingDocument;
-  localFiles: ResourceLocalFile[];
-  etag: string | null;
+  ignored: string[];
+  count: number;
+  revision: string;
+}
+
+/** Restore one or more current ignored temporary mappings to Pending inbox paths. */
+export interface ResourceUnignoreRequest {
+  ifMatch: string | null;
+  virtualPaths: string[];
+}
+
+export interface ResourceUnignoreResponse {
+  restored: string[];
+  count: number;
+  revision: string;
 }
 
 /**
@@ -191,9 +213,7 @@ export interface ResourceReleaseRequest {
 
 export interface ResourceReleaseResponse {
   released: string[];
-  mapping: MappingDocument;
-  localFiles: ResourceLocalFile[];
-  etag: string | null;
+  revision: string;
 }
 
 // ---- resource fingerprints (server-authorized hash calculation) ----
@@ -211,39 +231,33 @@ export interface ResourceFingerprintsRequest {
   algorithms: HashAlgorithm[];
 }
 
-/** Terminal per-(resource, algorithm) outcome of a fingerprint run. */
-export interface ResourceFingerprintResult {
-  virtualPath: string;
-  algorithm: HashAlgorithm;
-  status: 'succeeded' | 'failed';
-  /**
-   * Success: `computed` | `reused`. Failure: `source_stale`,
-   * `changed_during_hash`, `unsupported_image`, `image_too_large`,
-   * `hash_failed`, `capacity_exceeded` or `rfg_unavailable`.
-   */
-  code: string;
-  value: string | null;
-  /** Hash profile (e.g. `imagehash-8-v1` for perceptual hashes); null otherwise. */
-  profile: string | null;
-  /** True when the value was persisted onto the RFG mapping entry. */
-  persisted: boolean;
-}
-
+/** POST enqueues a process-local task; GET /api/tasks is its terminal surface. */
 export interface ResourceFingerprintsResponse {
-  mapping: MappingDocument;
-  etag: string | null;
-  results: ResourceFingerprintResult[];
+  task: TaskRecord;
 }
 
-export interface ResourceBatchRematchesRequest {
+export interface ResourceExplicitRematchRequest {
   ifMatch: string | null;
+  mode: 'explicit';
+  matches: { targetVirtualPath: string; candidateInboxVirtualPath: string }[];
+}
+
+export interface ResourceAutoRematchRequest {
+  ifMatch: string | null;
+  mode: 'auto';
   candidateInboxVirtualPaths: string[];
+  /** Optional reviewed subset of missing stable-object targets. */
+  targetVirtualPaths?: string[];
   algorithms: (HashAlgorithm | 'filename' | 'sizeBytes')[];
 }
 
-export interface ResourceBatchRematchesResponse extends ResourceRematchesResponse {
+export type ResourceRematchRequest = ResourceExplicitRematchRequest | ResourceAutoRematchRequest;
+
+export interface ResourceRematchResponse {
+  applied: number;
   ambiguous: string[];
   unmatched: string[];
+  revision: string;
 }
 
 // ---- background tasks (read-only status) ----
@@ -277,4 +291,25 @@ export interface TaskRecord {
   succeeded: number;
   failed: number;
   items: TaskItemRecord[];
+}
+
+/** One UTC log-date group returned by the paginated task-history endpoint. */
+export interface TaskDay {
+  date: string;
+  tasks: TaskRecord[];
+}
+
+/** GET /api/tasks log-day page. */
+export interface TasksPageResponse {
+  days: TaskDay[];
+  /** Oldest date in this page when an earlier page exists. */
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+export interface ListTasksParams {
+  /** Select existing log dates strictly earlier than this ISO calendar date. */
+  before?: string;
+  /** Number of existing log dates to return; the backend accepts 1–30. */
+  limitDays?: number;
 }

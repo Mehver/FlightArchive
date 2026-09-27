@@ -25,6 +25,11 @@ export function catalogEntryKey(kind: CatalogKind, entry: CatalogEntry): string 
   return kind === 'aircraft-types' ? (entry as AircraftType).icao : (entry as Airline | Airport).code;
 }
 
+/** Resolve the authoritative path key used by the catalog merge-upsert. */
+export function catalogEntryPayloadKey(kind: CatalogKind, entry: Record<string, unknown>): string {
+  return String(entry[kind === 'aircraft-types' ? 'icao' : 'code'] ?? '').trim().toUpperCase();
+}
+
 function emptyEntry(kind: CatalogKind): Record<string, unknown> {
   if (kind === 'airlines') return { code: '', icao: '', nameZh: '', nameEn: '', alliance: null, horizontalLogoResourcePath: null, horizontalDarkLogoResourcePath: null, symbolLogoResourcePath: null, brandColors: { primary: null, contrast: null } };
   if (kind === 'airports') return { code: '', icao: '', nameZh: '', nameEn: '', cityZh: '', cityEn: '', countryZh: '', countryEn: '', terminals: [] };

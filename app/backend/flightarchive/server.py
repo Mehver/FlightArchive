@@ -12,6 +12,7 @@ Pillow, and only then imports the RFG factory.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -33,6 +34,8 @@ from .thumbnails import ThumbnailStore
 from .tasks import BackgroundTaskRegistry
 from .workspace.state import Workspace
 
+logger = logging.getLogger(__name__)
+
 
 class SpaStaticFiles(StaticFiles):
     """Serve real static files, then the SPA entrypoint for client routes."""
@@ -49,7 +52,12 @@ class SpaStaticFiles(StaticFiles):
 
 
 def _directory(value: str | Path | None, env: str, default: str, *, create: bool) -> Path:
-    path = Path(value or os.getenv(env, default)).expanduser()
+    configured: str | Path | None = value
+    if configured is None or (isinstance(configured, str) and not configured.strip()):
+        configured = os.getenv(env)
+    if configured is None or (isinstance(configured, str) and not configured.strip()):
+        configured = default
+    path = Path(configured).expanduser()
     if create: path.mkdir(parents=True, exist_ok=True)
     if not path.is_dir(): raise RuntimeError(f"{env} must name {'a creatable' if create else 'an existing'} directory: {path}")
     return path.resolve()
@@ -93,7 +101,16 @@ def create_app(*, resource_root: str | Path | None = None, data_root: str | Path
         # Mounted applications do not have a lifecycle guarantee.  RFG builds
         # its initial catalog in its lifespan, so compose it explicitly.
         async with rfg_app.router.lifespan_context(rfg_app):
-            yield
+            try:
+                yield
+            finally:
+                try:
+                    await app.state.background_tasks.shutdown()
+                finally:
+                    try:
+                        app.state.thumbnail_store.close()
+                    except Exception:
+                        logger.warning("could not close thumbnail store", exc_info=True)
 
     app = FastAPI(lifespan=lifespan)
     current = workspace or Workspace(seed=False)
@@ -117,7 +134,7 @@ def create_app(*, resource_root: str | Path | None = None, data_root: str | Path
     # TestClient instances do not share capacity.
     app.state.thumbnail_job_limiter = asyncio.Semaphore(config.thumbnails.job_concurrency)
     app.state.resource_lifecycle = ResourceLifecycleService(app)
-    app.state.background_tasks = BackgroundTaskRegistry()
+    app.state.background_tasks = BackgroundTaskRegistry(data / "flightarchive" / "log" / "task")
     app.include_router(router)
     app.include_router(images_router)
 
