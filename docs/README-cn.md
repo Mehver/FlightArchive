@@ -1,6 +1,6 @@
 <div align="center">
     <img src="https://github.com/Mehver/FlightArchive/raw/main/docs/icon/256.png" width="20%" alt="FlightArchive"/>
-    <h1>FlightArchive <code>v1.0.0</code></h1>
+    <h1>FlightArchive <code>v1.0.1</code></h1>
     <p><a href="https://github.com/Mehver/FlightArchive/blob/main/README.md">English</a> | 简体中文</p>
     <a href="https://github.com/Mehver/FlightArchive"><img src="https://img.shields.io/badge/-GitHub-3A3A3A?style=flat&amp;logo=GitHub&amp;logoColor=white" referrerpolicy="no-referrer" alt="FlightArchive GitHub 仓库"></a>
 	<a href='https://github.com/Mehver/FlightArchive/pkgs/container/flightarchive'><img src="https://img.shields.io/badge/-GHCR-8957E5?style=flat&amp;logo=GitHub&amp;logoColor=white" alt="GHCR"></a>
