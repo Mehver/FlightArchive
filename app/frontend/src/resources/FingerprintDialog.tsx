@@ -2,20 +2,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 /**
- * Controlled fingerprint dialog, inspired by the remappable-file-gateway
- * demo's hash workflow but narrowed to FlightArchive's business rule: only
- * object resources bound to persisted flights (boarding passes and attachments)
- * or airline logos can be fingerprinted, and successful values are persisted
- * onto their RFG mapping entries by the backend — never by the browser.
- *
- * The dialog is fully controlled: the parent owns enqueueing, busy state and
- * errors (including 409 ETag conflicts); the task drawer owns terminal status.
- * The dialog
+ * Controlled fingerprint dialog for present stable RFG mappings. The parent
+ * owns direct calculation, progress and errors, while this dialog
  * only owns the algorithm selection, and derives the concrete target list
  * at calculate time from the latest props so a background reload can never
- * resurrect a stale selection. Pending inbox files are not fingerprint
- * eligible until materialized and bound to a persisted business record, so they
- * are never offered here.
+ * resurrect a stale selection. Pending inbox files are not eligible until
+ * explicitly materialized.
  */
 
 import { useEffect, useMemo, useState } from 'react';
@@ -108,6 +100,8 @@ export function FingerprintDialog({
   targets,
   busy,
   error,
+  progress,
+  onCancel,
   onCalculate,
   onClose,
 }: {
@@ -116,6 +110,8 @@ export function FingerprintDialog({
   targets: FingerprintTarget[];
   busy: boolean;
   error: string | null;
+  progress?: { completed: number; total: number; succeeded: number; failed: number };
+  onCancel?: () => void;
   onCalculate: (virtualPaths: string[], algorithms: HashAlgorithm[], forceOverwrite: boolean) => void;
   onClose: () => void;
 }) {
@@ -183,6 +179,11 @@ export function FingerprintDialog({
             {error}
           </Alert>
         ) : null}
+        {busy && progress ? (
+          <Alert severity="info" sx={{ mb: 2 }}>
+            {`${progress.completed}/${progress.total} · ${progress.succeeded} succeeded · ${progress.failed} failed`}
+          </Alert>
+        ) : null}
 
         <Paper variant="outlined" sx={{ p: 1.5, mb: 2, maxHeight: targets.length > 1 ? 180 : undefined, overflow: 'auto' }}>
           {targets.map((target) => (
@@ -227,9 +228,7 @@ export function FingerprintDialog({
 
       </DialogContent>
       <DialogActions>
-        <Button onClick={onClose} disabled={busy}>
-          {t('cancel')}
-        </Button>
+        <Button onClick={busy && onCancel ? onCancel : onClose}>{t('cancel')}</Button>
         <Button
           variant="contained"
           disabled={busy || targets.length === 0 || selected.length === 0 || eligible.length === 0}

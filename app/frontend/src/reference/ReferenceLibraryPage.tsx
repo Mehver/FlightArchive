@@ -14,7 +14,7 @@
  * the standard forced-delete flow for referenced entries).
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Box,
   Button,
@@ -37,9 +37,10 @@ import {
 import AddIcon from '@mui/icons-material/Add';
 import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
-import { api, ApiError } from '../api/client';
 import type { AircraftType, Airline, Airport, FlightRecord } from '../api/types';
 import { useAppState } from '../state/AppState';
+import { useBusinessData } from '../domain/BusinessDataProvider';
+import { DomainConflictError } from '../domain/commands';
 import { PageHeader } from '../components/PageHeader';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { EmptyState, LoadingState } from '../components/States';
@@ -95,7 +96,8 @@ export function stringSuggestions(values: readonly (string | null)[], collator: 
 
 export function ReferenceLibraryPage() {
   const { t, language } = useTranslation();
-  const { catalogs, refreshAll, notify, showError } = useAppState();
+  const { catalogs, notify, showError } = useAppState();
+  const business = useBusinessData();
   const [activeTab, setActiveTab] = useState<LibraryKind>('flights');
   const kind: CatalogKind = activeTab === 'flights' ? 'airlines' : activeTab;
   const [query, setQuery] = useState('');
@@ -107,10 +109,8 @@ export function ReferenceLibraryPage() {
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [bulkDeleteForce, setBulkDeleteForce] = useState(false);
-  // Flight references are deliberately loaded separately from the catalogs:
-  // an unavailable count must not make catalog maintenance unavailable.
-  const [flights, setFlights] = useState<FlightRecord[]>([]);
-  const [flightsLoading, setFlightsLoading] = useState(true);
+  const flights = business.data?.flights ?? [];
+  const flightsLoading = business.phase === 'loading';
   const [flightDialogOpen, setFlightDialogOpen] = useState(false);
   const [editingFlight, setEditingFlight] = useState<FlightRecord | null>(null);
   const [savingFlight, setSavingFlight] = useState(false);
@@ -153,22 +153,6 @@ export function ReferenceLibraryPage() {
       : collator.compare(String(left), String(right));
     return direction === 'asc' ? result : -result;
   };
-
-  const fetchFlights = useCallback(async () => {
-    setFlightsLoading(true);
-    try {
-      const result = await api.listFlights();
-      setFlights(result.flights);
-    } catch (error) {
-      showError(error, t('failedToLoadFlights'), { action: t('failedToLoadFlights'), form: t('flightReference') });
-    } finally {
-      setFlightsLoading(false);
-    }
-  }, [showError, t]);
-
-  useEffect(() => {
-    void fetchFlights();
-  }, [fetchFlights]);
 
   const entries: CatalogEntry[] = useMemo(() => {
     if (!catalogs) return [];
@@ -366,7 +350,8 @@ export function ReferenceLibraryPage() {
       const key = editing
         ? catalogEntryKey(kind, editing.entry)
         : catalogEntryPayloadKey(kind, entry);
-      await api.putCatalogEntry(kind, key, entry);
+      business.upsertCatalogEntry(kind, key, entry);
+      await business.saveDocument(kind === 'aircraft-types' ? 'aircraft-types.json' : `${kind}.json`);
       if (editing) {
         notify(t(editing.derived ? 'catalogEntryAdded' : 'catalogEntryUpdated'), 'success', { resource: catalogEntryKey(kind, editing.entry), form: t('flightReference') });
       } else {
@@ -374,7 +359,6 @@ export function ReferenceLibraryPage() {
       }
       setDialogOpen(false);
       setEditing(null);
-      await refreshAll();
     } catch (error) {
       showError(error, t('couldNotSaveCatalog'), { action: t('save'), form: t('flightReference') });
     } finally {
@@ -385,13 +369,13 @@ export function ReferenceLibraryPage() {
   const deleteEntry = async (force = false) => {
     if (!deleting) return;
     try {
-      await api.deleteCatalogEntries(kind, [catalogEntryKey(kind, deleting)], force);
+      business.deleteCatalogEntries(kind, [catalogEntryKey(kind, deleting)], force);
+      await business.saveDocument(kind === 'aircraft-types' ? 'aircraft-types.json' : `${kind}.json`);
       notify(t('catalogEntryDeleted', { key: catalogEntryKey(kind, deleting) }), 'success', { resource: catalogEntryKey(kind, deleting), form: t('flightReference') });
       setDeleting(null);
       setDeleteForce(false);
-      await refreshAll();
     } catch (error) {
-      if (error instanceof ApiError && error.httpStatus === 409 && !force) {
+      if (error instanceof DomainConflictError && !force) {
         setDeleteForce(true);
       } else {
         showError(error, t('couldNotDeleteCatalog'), { action: t('delete'), resource: catalogEntryKey(kind, deleting), form: t('flightReference') });
@@ -406,14 +390,14 @@ export function ReferenceLibraryPage() {
     const keys = [...selected];
     if (keys.length === 0) return;
     try {
-      const result = await api.deleteCatalogEntries(kind, keys, force);
-      notify(t('catalogEntriesDeleted', { count: result.deleted.length }), 'success', { form: t('flightReference') });
+      const deleted = business.deleteCatalogEntries(kind, keys, force);
+      await business.saveDocument(kind === 'aircraft-types' ? 'aircraft-types.json' : `${kind}.json`);
+      notify(t('catalogEntriesDeleted', { count: deleted.length }), 'success', { form: t('flightReference') });
       setSelected(new Set());
       setBulkDeleting(false);
       setBulkDeleteForce(false);
-      await refreshAll();
     } catch (error) {
-      if (error instanceof ApiError && error.httpStatus === 409 && !force) {
+      if (error instanceof DomainConflictError && !force) {
         setBulkDeleteForce(true);
       } else {
         showError(error, t('couldNotDeleteCatalog'), { action: t('delete'), form: t('flightReference') });
@@ -425,17 +409,19 @@ export function ReferenceLibraryPage() {
     setSavingFlight(true);
     try {
       if (editingFlight) {
-        const updated = await api.updateFlight(editingFlight.id, payload);
+        const updated = business.updateFlight(editingFlight.id, payload);
+        await business.saveDocument('flights.json');
         notify(t('flightUpdated'), 'success', { resource: editingFlight.id, form: t('flightReference') });
-        setEditingFlight(updated.flight);
-        setFlights((current) => current.map((f) => f.id === updated.flight.id ? updated.flight : f));
+        setEditingFlight(updated);
       } else {
-        const created = await api.createFlight(payload);
-        notify(t('flightAdded'), 'success', { resource: created.flight.id, form: t('flightReference') });
-        setEditingFlight(created.flight);
-        setFlights((current) => [created.flight, ...current]);
+        const created = business.createFlight(payload);
+        // Establish edit identity before persistence completes. If the queued
+        // write fails, another Save updates this same working record instead
+        // of creating a duplicate.
+        setEditingFlight(created);
+        await business.saveDocument('flights.json');
+        notify(t('flightAdded'), 'success', { resource: created.id, form: t('flightReference') });
       }
-      await fetchFlights();
     } catch (error) {
       showError(error, t('couldNotSaveFlight'), { action: t('save'), resource: editingFlight?.id, form: t('flightReference') });
     } finally {
@@ -446,10 +432,10 @@ export function ReferenceLibraryPage() {
   const deleteOneFlight = async () => {
     if (!deletingFlight) return;
     try {
-      await api.deleteFlight(deletingFlight.id);
+      business.deleteFlight(deletingFlight.id);
+      await business.saveDocument('flights.json');
       notify(t('flightDeleted', { flightNumber: displayFlightNumber(deletingFlight.airlineCode, deletingFlight.flightNumber) }), 'success', { resource: deletingFlight.id, form: t('flightReference') });
       setDeletingFlight(null);
-      await fetchFlights();
     } catch (error) {
       showError(error, t('couldNotDeleteFlight'), { action: t('delete'), resource: deletingFlight.id, form: t('flightReference') });
     }
@@ -461,14 +447,13 @@ export function ReferenceLibraryPage() {
     try {
       let deletedCount = 0;
       for (const id of ids) {
-        await api.deleteFlight(id);
+        business.deleteFlight(id);
         deletedCount++;
       }
+      await business.saveDocument('flights.json');
       notify(t('flightsDeleted', { count: deletedCount }), 'success', { form: t('flightReference') });
       setSelected(new Set());
-      await fetchFlights();
     } catch (error) {
-      await fetchFlights();
       showError(error, t('couldNotDeleteFlight'), { action: t('delete'), form: t('flightReference') });
     } finally {
       setBulkDeletingFlights(false);
@@ -791,7 +776,6 @@ export function ReferenceLibraryPage() {
         onSave={(payload) => void saveFlight(payload)}
         onRecordChanged={(updated) => {
           setEditingFlight(updated);
-          setFlights((current) => current.map((flight) => flight.id === updated.id ? updated : flight));
         }}
         onClose={() => {
           setFlightDialogOpen(false);

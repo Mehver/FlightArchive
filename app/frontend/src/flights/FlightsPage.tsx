@@ -8,7 +8,7 @@
  * flight-detail sheet. Browse-only: no create/edit/delete controls.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Box,
   MenuItem,
@@ -19,9 +19,9 @@ import {
 } from '@mui/material';
 import GridViewOutlinedIcon from '@mui/icons-material/GridViewOutlined';
 import ViewListOutlinedIcon from '@mui/icons-material/ViewListOutlined';
-import { api } from '../api/client';
-import type { FlightRecord } from '../api/types';
 import { useAppState } from '../state/AppState';
+import { useBusinessData } from '../domain/BusinessDataProvider';
+import { selectFlights } from '../domain/selectors';
 import { PageHeader } from '../components/PageHeader';
 import { EmptyState, ErrorState, LoadingState } from '../components/States';
 import { displayName } from '../utils/format';
@@ -34,27 +34,13 @@ import { useTranslation } from '../i18n';
 export function FlightsPage() {
   const { t } = useTranslation();
   const { catalogs } = useAppState();
-  const [flights, setFlights] = useState<FlightRecord[] | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const { data, phase, loadError, reload } = useBusinessData();
   const [query, setQuery] = useState('');
   const [airline, setAirline] = useState('');
   const [viewMode, setViewMode] = useFlightViewMode();
-  const [detail, setDetail] = useState<FlightRecord | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      const data = await api.listFlights({ q: query, airline });
-      setFlights(data.flights);
-      setLoadError(null);
-    } catch {
-      setLoadError(t('failedToLoadFlights'));
-    }
-  }, [query, airline, t]);
-
-  useEffect(() => {
-    const handle = window.setTimeout(() => void load(), 250);
-    return () => window.clearTimeout(handle);
-  }, [load]);
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const flights = useMemo(() => data ? selectFlights(data, { query, airline }) : null, [data, query, airline]);
+  const detail = data?.flights.find((flight) => flight.id === detailId) ?? null;
 
   const airlineNames = useMemo(() => new Map((catalogs?.airlines ?? []).map((item) => [item.code, displayName(item.nameZh, item.nameEn, t('notAvailable'))])), [catalogs, t]);
   const airlines = useMemo(() => new Map((catalogs?.airlines ?? []).map((item) => [item.code, item])), [catalogs]);
@@ -65,7 +51,7 @@ export function FlightsPage() {
     airlineNames,
     airlines,
     airports,
-    onOpen: setDetail,
+    onOpen: (flight: { id: string }) => setDetailId(flight.id),
   };
 
   const viewToggle = (
@@ -125,8 +111,8 @@ export function FlightsPage() {
         </TextField>
       </Box>
 
-      {loadError ? (
-        <ErrorState message={loadError} onRetry={() => void load()} />
+      {phase === 'error' ? (
+        <ErrorState message={loadError?.message ?? t('failedToLoadFlights')} onRetry={() => void reload()} />
       ) : flights === null ? (
         <LoadingState label={t('loadingFlights')} />
       ) : flights.length === 0 ? (
@@ -144,8 +130,8 @@ export function FlightsPage() {
         flight={detail}
         catalogs={catalogs}
         airlineNames={airlineNames}
-        open={detail !== null}
-        onClose={() => setDetail(null)}
+        open={detailId !== null && detail !== null}
+        onClose={() => setDetailId(null)}
       />
     </Box>
   );

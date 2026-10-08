@@ -13,7 +13,9 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:browser-images": "node tests/browserImages.mjs",
+    "test:thumbnail-relay": "node tests/thumbnailRelay.mjs"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",

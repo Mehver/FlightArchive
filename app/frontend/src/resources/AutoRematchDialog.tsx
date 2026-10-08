@@ -29,7 +29,7 @@ export function AutoRematchDialog({
 }: AutoRematchDialogProps) {
   const { t } = useTranslation();
   const [chosen, setChosen] = useState<AutoMatchAlgorithm[]>(['filename', 'sizeBytes']);
-  const inboxOnly = useMemo<ResourceBrowserFilter>(() => ({ review }) => review.state === 'pending', []);
+  const inboxOnly = useMemo<ResourceBrowserFilter>(() => ({ resource }) => resource.state === 'pending' && resource.present, []);
   const browser = useResourceBrowser({ active: open, initialSelected: initialCandidatePaths, multiple: true, filter: inboxOnly });
 
   useEffect(() => {

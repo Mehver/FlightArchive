@@ -7,6 +7,7 @@ WORKDIR /src/app/frontend
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
 RUN corepack enable && pnpm install --frozen-lockfile
 COPY frontend ./
+COPY test-fixtures /src/app/test-fixtures
 RUN pnpm run build
 
 FROM python:3.14-slim AS runtime
@@ -15,9 +16,8 @@ WORKDIR /app
 
 COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
-RUN mkdir -p /cache
 COPY backend/flightarchive ./flightarchive
 COPY --from=frontend-builder /src/app/frontend/build ./frontend
 
 EXPOSE 8080
-CMD ["python", "-m", "uvicorn", "flightarchive.server:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python", "-m", "flightarchive.container"]

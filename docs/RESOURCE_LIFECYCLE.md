@@ -1,107 +1,105 @@
 # Resource lifecycle contract
 
-## State machine
+## Authority
 
-RFG discovers source files; FlightArchive never reads source paths directly.
+RFG (the pinned `remappable-file-gateway` package) is the authority for the resource catalog, virtual-path mapping, hashes, and original source bytes. FlightArchive never reads resource source paths directly; it uses only RFG's documented HTTP endpoints. The browser holds the current mapping document, applies explicit transforms to it, and writes it back.
 
-```text
-source discovered -> POST /api/resources/reconcile -> inbox/<local_path> (Pending)
-Pending + explicit picker ignore -> ignore/<encoded local_path> (Temporary, ignored)
-Ignored + Resource Mappings restore -> inbox/<local_path> (Pending)
-Pending + valid persisted use -> human-readable object path (Materialized / referenced)
-object has last persistent reference removed + source present -> inbox/<local_path>
-object source disappears -> missing object mapping (retained, Rematchable)
-missing object + cataloged inbox candidate -> target object path rebound (Rematched)
-present object + manual force rebind -> same object path rebound to a chosen inbox candidate (Rematched)
-```
+There is no backend resource lifecycle service: no `/api/resources/*`, no automatic reconciliation, no automatic release, no deferred-release queue, no ownership registry, and no fingerprint queue. The backend host exposes only the named-document archive, activity, status, and legacy task read routes, plus the domain-neutral, scale-only `/api/thumbnails` relay described under [Browser image rendering](#browser-image-rendering).
 
-The object path is human-readable and derived from the resource's owners by `generate_resource_name` in `routes/api.py`. Flight assets use `YYYYMMDD + airlineCode.lower() + zero-padded flightNumber + role + index` (role `a` paper, `b` electronic, `c` attachment); airline logos use `airlineCode.lower() + '-' + logo role` (`horizontal`/`horizontal-dark`/ `symbol`). Shared resources merge every owner fragment with `+`, and a same-owner source replacement appends a short source hash to stay unique. Callers must not reconstruct these names and should treat persisted paths as stable; existing object paths are never renamed. A valid form is materialized only after complete business validation. Failed validation leaves its pending mapping unchanged.
+## RFG client
 
-## Invariants
+`app/frontend/src/rfg/api.ts` is the minimal same-origin client:
 
-- `inbox/` and `ignore/` are the one temporary-mapping layer. Reconciliation adds every previously unmapped cataloged source as `inbox/<local_path>` and removes either temporary mapping when its exact local path leaves the current catalog; a moved source is then discovered anew as inbox. Every non-temporary path is a stable object mapping, so any stable object remains available for explicit rematch (a present object can be force-rebound).
-- Object paths are shareable across all three flight boarding-pass slots, flight attachment lists, flights, and all airline logo slots. Release occurs only after the **last persistent** reference disappears.
-- An airline has one PNG/SVG symbol-logo slot and two equivalent horizontal-logo slots (light and dark). The display may use the other horizontal resource when the theme-preferred one is absent; neither a tail logo nor a dark symbol slot exists.
-- Automatic release considers only paths made obsolete by that mutation; it never sweeps unrelated mappings. It returns a present unreferenced object to its inbox path and never deletes source files.
-- There is no resource ownership registry, full orphan-mapping scan, or restart-durable cleanup queue. Business persistence is authoritative; any post-commit release retry is deliberately bounded best effort.
-- Business persistence, release, fingerprinting, and rematch targets require stable object mappings; neither kind of temporary mapping can be persisted, released, fingerprinted, or targeted for rematch. Materialization and rematch candidates explicitly require present `inbox/` mappings. Ignore, unignore, release, and rematch batch mutations accept at most 256 selected paths. `POST /api/resources/ignore` accepts one or more `virtualPaths`, and it and `POST /api/resources/unignore` validate and commit their selected temporary mappings atomically; unignore applies only to present ignored mappings.
-- `POST /api/resources/release` is explicit: each path must be a mapped, stable object, present in the current RFG catalog, and unreferenced. It also never deletes a local source file. A missing, referenced, temporary, or stale selection is rejected.
-- Rematch accepts a stable object target (present or missing) and a distinct, present inbox candidate; it preserves the target virtual path while swapping its local source. Targets/candidates must be unique. Rebinding clears target hash metadata; auto rematch restores only hashes verified against the selected new source. A rebound target that remains business-referenced and stored no content hash is queued a full fingerprint run (fingerprinting is scoped to business-referenced stable objects).
-- Fingerprinting accepts currently cataloged stable object paths referenced by a saved flight **or an airline logo**. Content hashes are available for any such current source; perceptual hashes are restricted to `.avif`, `.bmp`, `.gif`, `.jpeg`/`.jpg`, `.png`, and `.webp`. Manual single- and multi-resource runs are incremental by default (targets already storing every selected algorithm are skipped); the review dialog offers an explicit force-overwrite option. Pending inbox candidates may be hashed transiently for batch rematch comparison, but no fingerprint metadata is stored on either temporary mapping kind.
-- Automatic image fingerprinting and `POST /api/resources/fingerprints` use one process-local, single-worker FIFO queue. The POST validates its body, reviewed mapping ETag and eligibility, then returns `202` with a task snapshot without hashing inline. Queue scheduling remains ephemeral and is never replayed after restart. Status and result history is append-only JSONL in `<RFG_DATA_DIR>/flightarchive/log/task/<UTC creation day>.jsonl`; all later updates stay in the creation-day file. IDs use `task-<compact UTC timestamp with microseconds>-<random suffix>`. Before persistence, the worker captures and revalidates mapping/local-source and RFG source ETags, so a hash for an old source fails rather than being stored on a replacement mapping.
+| Call | Endpoint |
+| --- | --- |
+| `getCatalog` | `GET /api/v1/meta/local` → `{local_files: [{local_path, size_bytes}]}` |
+| `getMapping` | `GET /api/v1/meta/map` → `{document, etag}` (the `ETag` header is read, or `null`) |
+| `putMapping` | `PUT /api/v1/meta/map` with the full mapping document |
+| `computeHash` | `POST /api/v1/hashes` |
+| `getResource` / `headResource` | `GET` / `HEAD /res/{virtual_path}` |
 
-## Operations
+`resourceUrl` percent-encodes each path segment and addresses original source bytes; it is used only for explicit Studio editing and downloads. Raster display uses `thumbnailUrl` (`/api/thumbnails/...`) through the bounded relay, and the original URL is never assigned directly to a raster `<img>`.
 
-| Trigger / API | Mapping effect | Business/cache consequence |
-| --- | --- | --- |
-| `GET /api/resources/review` | none (pure read) | return the mapping revision and authoritative mapping/catalog/business-use join without an RFG write |
-| `POST /api/resources/reconcile` | catalog new sources into inbox; remove stale temporary inbox/ignore entries; preserve missing object mappings | reconcile disposable bindings, discard stale bindings, and return the same snapshot shape as review |
-| Create/update flight or airline with inbox relation | materialize once to a named object path | only inbox may materialize; ignored mappings are never persisted |
-| Flight mutation, catalog merge-upsert (`PUT /api/catalogs/{kind}/{key}`), catalog delete command (`POST /api/catalogs/{kind}/delete`), or reset | after successful business transaction, release eligible former candidates | retain if still referenced; invalidate affected flight previews |
-| `POST /api/resources/release` | selected eligible object -> inbox | clears fingerprint metadata on renamed entry and rebinds generic thumbnail |
-| `POST /api/resources/ignore` | selected present inbox entries -> ignore | all-or-nothing mapping-only hide; request is `{ifMatch, virtualPaths}` |
-| `POST /api/resources/unignore` | selected present ignore entries -> inbox | all-or-nothing mapping-only restore; clears temporary fingerprint metadata and rebinds generic thumbnail where possible |
-| `POST /api/resources/rematch` (`mode: "explicit"`) | each selected stable target (present or missing) takes its specified candidate's local source; candidate inbox entries are consumed once | preflights the complete unique target/candidate set, performs one mapping PUT and cache rebind/discard, then queues a full fingerprint run for each business-referenced rebound target that stored no content hash |
-| `POST /api/resources/rematch` (`mode: "auto"`) | compares selected inbox files to the target missing mappings on every selected field and applies only unambiguous one-to-one matches; unmatched or multiply-matched targets are skipped | optional `targetVirtualPaths` limits the reviewed missing subset; candidate hashes are computed by the backend and remain transient; business-referenced matches that stored no content hash queue a full fingerprint run |
-| `POST /api/resources/fingerprints` | validates then enqueues requested RFG hashes for eligible, present stable business resources; returns `202` task snapshot | temporary mappings are ineligible; status/result snapshots are appended to the task log and read through `GET /api/tasks` |
+There is **no `If-Match`** on mapping writes and no conditional-write revision. `getMapping` surfaces RFG's `ETag`, but no render or write path depends on it. Mapping writes are read-modify-write with last-writer-wins; the single-user LAN deployment relies on explicit operations rather than server-side concurrency control.
 
-Mutation wire shapes are intentionally compact:
+`HASH_ALGORITHMS` is `['crc32', 'md5', 'sha256', 'ahash', 'dhash', 'phash']`; `PERCEPTUAL_ALGORITHMS` is `['ahash', 'dhash', 'phash']`.
 
-- `ignore`: `{ifMatch, virtualPaths: string[]}` -> `{ignored: string[], count, revision}`.
-- `unignore`: `{ifMatch, virtualPaths: string[]}` -> `{restored: string[], count, revision}`.
-- `release`: `{ifMatch, virtualPaths: string[]}` -> `{released: string[], revision}`.
-- explicit `rematch`: `{ifMatch, mode: "explicit", matches: [{targetVirtualPath, candidateInboxVirtualPath}]}` -> `{applied, ambiguous, unmatched, revision}`.
-- automatic `rematch`: `{ifMatch, mode: "auto", candidateInboxVirtualPaths, targetVirtualPaths?, algorithms}` -> the same rematch response. `algorithms` may contain stored content/perceptual fingerprints plus `filename` and `sizeBytes`; candidate values are always derived server-side.
-- `fingerprints`: `{ifMatch, virtualPaths, algorithms}` -> `202 {task}`.
+## Inventory and states
 
-Catalog deletion is also a single compact command: `POST /api/catalogs/{kind}/delete` accepts `{keys, force?}`. Single-row deletion sends one key in the array; preflight and business mutation are atomic, and resource release remains post-commit best effort under the rules above. Catalog creation/update uses the keyed merge-upsert `PUT /api/catalogs/{kind}/{key}` so an unlisted flight code can become a catalog entry without a second creation route.
+`app/frontend/src/rfg/mapping.ts` derives an inventory from the mapping document plus the catalog (`resourceInventory`). Every row has `virtualPath` (null only for `local_only`), `localPath`, `state`, `present`, `sizeBytes`, and `entry`.
 
-Product/frontend versions may change incompatibly and do not alter resource persistence semantics. Within a product major version, `<RFG_DATA_DIR>/flightarchive/v1/`, BusinessData and preview-config `schemaVersion`, embedded layout/electronic `schemaVersion`, and the upstream RFG `/api/v1/*` contract remain compatible.
+| State | Meaning |
+| --- | --- |
+| `mapped` | stable object path whose local source is present |
+| `pending` | `inbox/<local_path>` mapping |
+| `ignored` | `ignore/<local_path>` mapping |
+| `missing` | stable object path whose local source is absent (retained so it can be reviewed and rematched) |
+| `local_only` | catalog source with no mapping |
 
-## Picker behavior
+`resources/mappingRows.ts` projects these into the mappings page's `paired`, `inbox`, `ignored`, `missing`, and `local_only` row kinds.
 
-The resource screens consume the review snapshot directly through a shared browser core (`useResourceBrowser` + `ResourceBrowser`). It reconciles once on each closed-to-open edge so newly discovered files can enter Pending, then uses read-only review refreshes after mutations. It does not read raw mapping/catalog/business records or rebuild usage in the browser. Ignored mappings remain non-selectable temporary entries. The form picker shell (`ResourcePickerDialog`) lists inbox pending first, then mapped/associated entries, and hides the rest; automatic rematch (`AutoRematchDialog`) and manual rebind show inbox candidates only.
+## Path rules
 
-## Review snapshot
+- A safe relative POSIX path is non-empty, does not start with `/`, contains no `\` or NUL, and has no empty, `.` or `..` segment.
+- `inbox/` and `ignore/` are the only temporary prefixes. `isStablePath` is a safe relative path outside both.
+- `validateMapping` accepts only an `entries` document, safe relative virtual/local paths, unique virtual and local paths, `size_bytes` as a non-negative safe integer or null, and each hash algorithm as a non-empty string or null; unsupported fields are rejected.
+- Batch mutations accept 1–256 unique safe paths (`MAX_MAPPING_BATCH`).
 
-`GET /api/resources/review` and successful `POST /api/resources/reconcile` both return `{revision, rows}`. Each row has camel-case `virtualPath` (null only for `local_only`), `localPath`, `state`, `present`, `sizeBytes`, stored fingerprint algorithm names, detailed `uses`, and `capabilities`. States are `mapped`, `pending`, `ignored`, `missing`, and `local_only`.
+## Explicit mapping operations
 
-Flight uses include `id`, `airlineCode`, `flightNumber`, `departureDate`, and the precise boarding-pass/attachment `role`; airline uses include `code` and a `horizontal`, `horizontal-dark`, or `symbol` role. This index is also the source for the existing persistent-reference set, so release and fingerprint ownership checks do not maintain a second ownership implementation.
+All transforms are pure functions in `rfg/mapping.ts`; `ResourceMappingProvider` writes the result only when it actually changed.
 
-Capabilities are computed by the backend: `release` requires a present stable object with no uses; `fingerprint` requires a present stable object with at least one use; `rematchTarget` requires a missing stable object; `rematchCandidate` and `ignore` require a present inbox row; and `unignore` is confined to ignored rows. Review does not reconcile, clean up, persist business data, or write the RFG mapping.
+- `reconcileMapping` — drops a temporary entry whose exact local source is gone, then adds each unmapped catalog source as `inbox/<local_path>`. Stable entries, including missing ones, are preserved. A virtual-path collision is an error.
+- `materializeMapping` — moves one present `inbox/` entry to a requested stable path that preserves the source extension and does not collide. Metadata is reset to the new path/size.
+- `ignoreMappings` / `unignoreMappings` — move selected present temporary entries between `inbox/` and `ignore/`; every selected entry must currently be in the expected prefix.
+- `releaseMappings` — moves selected present stable entries back to `inbox/<local_path>`. It is an explicit mapping mutation and does not consult business references (there is no uses/ownership index); the operator is responsible for not releasing a path that is still referenced by saved business data.
+- `rematchMappings` — for each unique target/candidate pair, the stable target (present or missing) takes the present `inbox/<local_path>` candidate's local source while keeping its virtual path; the candidate entry is consumed. Optional supplied hashes are copied onto the target.
+- `autoMatchMappings` — compares each selected missing stable target against selected present inbox candidates on the chosen fields (`filename`, `sizeBytes`, or stored hash algorithms) and applies only unambiguous one-to-one matches; multiply-matched targets are `ambiguous` and field-less targets are `unmatched`.
+- `applyFingerprints` — writes verified hashes onto the matching present stable entry; entries that are temporary, local-only, missing, or whose local path no longer matches are skipped.
 
-- **Pending** inbox mappings with a present local source remain selectable.
-- **Present mapped** object mappings remain selectable and shareable, including mappings already used by flights or airline logos.
-- **Missing object** mappings remain visible as error-status **Source missing** entries so their retained object path can be reviewed and rematched. They use an unavailable file placeholder, do not load thumbnails, and cannot be newly selected by pointer or keyboard. A missing path that was already selected when the dialog opened is retained, allowing the existing value to be viewed or left unchanged.
-- Picker inventory is loaded on each closed-to-open transition. The initial selection is snapshotted at that edge, so parent rerenders and language changes while the dialog is open do not reload inventory or reset temporary selection, search, or pagination state. Closing the dialog cancels its in-flight reads, and only the latest opening may publish a response.
+## ResourceMappingProvider
 
-## Concurrency, ETags, and failures
+`rfg/ResourceMappingProvider.tsx` owns `{catalog, mapping, inventory, loading, error, fingerprintProgress}` and exposes `refresh`, `reconcile`, `materialize`, `release`, `ignore`, `unignore`, `rematch`, `autoRematch`, `fingerprint`, and `cancelFingerprint`.
 
-Reviewed resource-mapping writes (`ignore`, `unignore`, `release`, `rematch`, and `fingerprints`) require a string `ifMatch` equal to RFG's current `/api/v1/meta/map` ETag; null, omitted, or stale values are conflict/retry conditions. A missing RFG ETag is an availability failure. Mapping writes send that revision as `If-Match`. Successful `ignore`, `unignore`, `release`, and `rematch` responses contain only operation results plus `revision`, never raw `mapping` or `localFiles`; fingerprints remains a `202` task response. The lock order is `business_lock` before lifecycle mapping lock and workspace lock. It prevents a business reference from being acquired between release ownership check and map write; manual release waits for the same business critical section.
+- `refresh` reads the catalog and mapping and publishes them (`loading`/`error` reflect the read).
+- `mutate` re-reads both, applies a pure transform, writes the mapping only if it changed, then re-reads and publishes. This is the explicit-operation path for reconcile, materialize, release, ignore, unignore, and manual rematch.
+- `autoRematch` validates the batch, computes each candidate's selected hashes through RFG in the browser, re-reads the mapping and verifies the candidate's `local_path` did not change while hashing, applies only unambiguous matches, writes if any were applied, and returns `{applied, ambiguous, unmatched}`.
+- `fingerprint` validates 1–32 unique present stable targets and non-empty unique valid algorithms, aborts any previous run, starts a new session id, computes each `(virtualPath, algorithm)` through RFG, and applies the successful results. `fingerprintProgress` reports `running`, `succeeded`, `failed`, or `cancelled` with completed/succeeded/failed/total. `cancelFingerprint` aborts the active `AbortController`; a cancelled run does not publish its results.
+- Important mapping/fingerprint failures are reported to `POST /api/activity` (source `frontend-resources`, codes `resource-mapping-failed` / `resource-fingerprint-failed`).
 
-The frontend treats `revision` as a coarse review lock. A shared `useResourceReview` request lifecycle exposes snapshot/loading/error/revision, aborts reads when its consumer closes or unmounts, and allows only the latest request to publish. Both resource screens render backend `uses` and obey backend `capabilities`; they do not repeat the mapping/catalog join, usage indexing, or action-eligibility rules. On `409` the mappings page clears all reviewed actions, replaces the actionable view with a fresh review load, and emits one shared warning asking the user to review and retry; it does not merge or replay stale selections. A committed mutation is never retried merely because the subsequent display refresh failed.
+All hashing, reconciliation, and rematching run in the browser and are computed by RFG through its documented HTTP API; RFG is the source of truth for hashes. There is no backend fingerprint task, no in-memory scheduler, and no server-side hash cache. (The `/api/thumbnails` relay keeps only disposable resized images and never stores hashes.)
 
-A successful RFG mapping `PUT` is the commit point. RFG currently omits the new ETag from that response, so FlightArchive reuses its preflight catalog and retries the required mapping refresh once (two attempts total). If both reads fail, the mapping remains committed and the API returns `503 resource-committed-refresh-failed`; `error.details.committed` is true and operation-specific result fields identify what was applied. Clients must refresh to confirm rather than retrying the mutation blindly. If RFG supplies a PUT ETag in the future, the committed document and that ETag are returned without a trailing mapping read.
+## Picker and mappings UI
 
-The business transaction rolls back in-memory domain state if atomic BusinessData persistence fails. Newly materialized paths are then best-effort released. Conversely, after a business mutation has succeeded, release failure does **not** undo it: only that mutation's stable-object candidates are queued in `deferred_releases` and retried on the next resource reconciliation. Missing sources, surviving references, temporary paths, and absent mappings are final non-retry outcomes. `deferred_releases` is process-local and is intentionally not restored after restart; the resource page and later reconciliation operations remain the recovery path.
+- `resources/useResourceBrowser.ts` opens a fresh session on each false→true `active` edge: it resets selection, query, error, and page, and calls the read-only `mapping.refresh()` once. Newly discovered files enter `inbox/` only through an explicit reconcile operation. The initial selection is captured at that edge, so parent rerenders and language changes do not reload the browser or reset in-progress state.
+- Visible rows always hide `ignored` entries and `pending` entries whose source is absent. The picker's default filter shows present stable mappings and retains an initial selection that has since gone missing (`resource.state === 'missing'` and already selected). `selectable="inbox"` restricts selection to present `pending` rows. Ordering is inbox-first, then by virtual path; page size is 24.
+- `resources/ResourceBrowser.tsx` renders thumbnails or a table, marks rows missing/pending/mapped, and disables pointer and keyboard selection for absent sources.
+- `resources/ResourceMappingsPage.tsx` exposes All, Rebuild (missing + inbox), Missing, Inbox, Ignored, Paired, and Local-only filters. Inbox supports materialize/ignore, Ignored supports unignore, Missing supports manual and automatic rematch, Paired supports fingerprint, manual rematch, and release. Selection is pruned to the current filter against complete mapping data.
 
-Task-log reads are serialized with appends inside one backend process. `GET /api/tasks` defaults to the newest three existing log dates and supports `before=<YYYY-MM-DD>&limitDays=<1..30>`; it returns `{days, nextCursor, hasMore}` and skips dates with no file. If the latest status for a task is `queued` **or** `running` but that task ID is absent from the current process's active registry, the read atomically appends a failed `task_interrupted` status and a result before returning it. Repeated reads do not append duplicates, and an incomplete trailing JSONL line is ignored. This is crash accounting, not work replay. The supported deployment is a single backend process; automatic log retention/deletion is intentionally deferred.
+## Browser image rendering
 
-## Cache behavior
+Raster display is relay-only. `resources/browserImageRenderer.ts` asks the backend's domain-neutral, scale-only `/api/thumbnails` relay for a small WebP and paints it, so an ordinary preview never holds a source-sized bitmap in the browser:
 
-All cache state is disposable and lives outside BusinessData.
+- The relay enforces the source/output bounds in [ARCHITECTURE.md](ARCHITECTURE.md) (256 MiB / 160,000,000 px source; 4,000,000 px / 4096 px / 4 MiB output). The browser renderer additionally caps the final encoded blob at 4 MiB, its own in-memory cache at 8 MiB / 48 entries, and each entry's TTL at 60 seconds; `loadBoundedSource` caps explicit originals at 24 MiB and rejects a decoded bitmap over 40,000,000 px / 16,384 px, with a default render dimension of 512 px.
+- A render first performs `HEAD /api/thumbnails/{path}?scale=0.015625` to read runtime metadata (`X-Source-Width`/`Height`/`Bytes`/`ETag`, `X-Thumbnail-*`). `selectThumbnailScale` picks the **smallest** allowed dyadic scale whose output still reaches the display-quality target, bounded by the pixel/dimension/source-byte budget; if the target is unreachable within the permitted sizes, the **largest permitted** scale is used. The render then `GET`s that scale, verifies the returned source identity equals the preflight, streams the small relay WebP under the 4 MiB cap, and rejects a response without a strong source `ETag`.
+- A crop is a canonical in-bounds rotated rectangle (`centerX`, `centerY`, `width`, `height`, `rotationDegrees`); `validateRenderBounds` requires all four rotated corners to fall inside the source. The output canvas is sized to the requested dimension and paints the already-EXIF-normalized relay bitmap in the original logical coordinate space (rotation applied), so persisted crop geometry stays exact without a source-sized canvas. Legacy `corners` are ignored.
+- Cache identity is `virtualPath + strong source ETag + scale + crop geometry + maxDimension`. It stores only final encoded blobs for at most 60 seconds, bounded by 8 MiB and 48 entries. One nearest-expiry timer removes idle entries; render access also prunes expired entries. Source-identity invalidation is derived from the bounded cache keys rather than a second path registry. Every caller receives and owns a new object URL; expiry and eviction never revoke a held URL, while caller release always revokes its URL. `dispose()` clears the timer and revokes all still-issued URLs.
+- `render` accepts an `AbortSignal`; `resources/useBrowserImage.ts` uses both abort and generation guards, releases late results, and preserves failure causes. `resources/useNearViewport.ts` gates work with an `IntersectionObserver` (`rootMargin: 250px 0px`) and turns it off when the element leaves, so offscreen grids do not hold decoded bitmaps or blob URLs. Raster display has **no automatic raw fallback**: a failed relay request shows an unavailable/preview-unavailable state instead of fetching the original. Full originals are loaded through `loadBoundedSource` only for explicit Scan Studio editing, and downloads use `resourceUrl` directly. SVG resources stay on the direct `resourceUrl` route because they are already scalable and bounded by layout.
 
-- `GET|HEAD /images/{virtual_path}` stores generic WebP thumbnail objects by rendered bytes and binds them to `(virtual_path, local_path, RFG source ETag, render profile)`. Materialize/release moves the generic binding to the new virtual path when possible; no re-render is required. Source replacement, external mapping change, missing source, or profile change invalidates it.
-- Boarding-pass preview is a separate `preview/<flight>/<slot>/<geometry>` binding. `GET /api/flights/{id}/boarding-passes/{slot}/preview` renders a bounded upright rectangular crop from canonical center/size/rotation fields, not a generic thumbnail. It accepts only `paperBoardingPassFront` and `paperBoardingPassBack`; an electronic slot is rejected with `404 boarding-pass-slot-not-found`. Electronic layouts have no server crop preview in the archive/detail UI. Paper rendering maps output pixels directly to oriented source coordinates, so an in-bounds rotated rectangle remains valid even near a source edge; do not implement it as whole-image rotation followed by crop. Legacy corners are ignored by rendering and geometry cache identity. Update, delete, reset, and resource reconciliation remove affected derived previews.
-- Both paths fetch original bytes through RFG `/res/*`, enforce configured byte and pixel limits, share the app-local thumbnail miss limiter, and return WebP ETags. No cache row grants filesystem access.
-- Generic `GET|HEAD /images/{virtual_path}` JPEG thumbnails ask Pillow for a decoder DCT draft targeting twice `maxDimension` before the configured pixel limit is checked. This can safely render a large JPEG when the decoder supplies a sufficiently small draft; other formats do not receive that path. Paper rectangular previews do **not** use JPEG drafting: they check the full decoded image dimensions against the configured pixel limit and reject an oversized JPEG before crop sampling.
+The retired domain endpoints stay retired: there is no `/images/*` route and no crop or boarding-pass preview endpoint. The only backend image route is the domain-neutral, scale-only `/api/thumbnails` relay, which accepts no crop, flight, or lifecycle input.
 
-## Source pointers and APIs
+## Fingerprints
 
-- Lifecycle implementation/helpers: `app/backend/flightarchive/routes/api.py` (`ResourceLifecycleService`, `resource_review_snapshot`, `persistent_business_resource_uses`, `persistent_business_resource_paths`, `_best_effort_release`, `ResourceOwner`, `generate_resource_name`).
-- Cache and crop geometry: `thumbnails.py`; HTTP image serving: `routes/images.py`.
-- Frontend mapping/release/rematch/fingerprint UI: `app/frontend/src/resources/` (`useResourceBrowser` + `ResourceBrowser`, `ResourcePickerDialog`, `AutoRematchDialog`, `ResourceMappingsPage`).
+For present stable mappings, the browser orchestrates fingerprint requests and RFG computes the hashes. Content hashes (`crc32`, `md5`, `sha256`) work on any source; perceptual hashes (`ahash`, `dhash`, `phash`) are offered only for raster extensions (`.avif`, `.bmp`, `.gif`, `.jpeg`/`.jpg`, `.png`, `.webp`) and fail terminally in RFG for unsupported payloads. `resources/fingerprints.ts` resolves calculable targets, hides controls for temporary/local-only rows, and chunks requests (at most 32 virtual paths per call). Stored hash metadata lives only on the mapping entry; it is never duplicated into BusinessData.
+
+## Legacy fingerprint task history
+
+`app/backend/flightarchive/legacy_tasks.py` read-only projects the retired task JSONL under `<RFG_DATA_DIR>/flightarchive/log/task/`. `GET /api/tasks` is its only HTTP surface: it returns the latest record per task id per UTC day with `before`/`limitDays` paging. It never repairs, rewrites, resumes, or executes work, and reading does not change file contents or mtimes.
+
+## Source pointers
+
+- RFG client and path rules: `app/frontend/src/rfg/api.ts`, `app/frontend/src/rfg/mapping.ts`.
+- Explicit operations and progress: `app/frontend/src/rfg/ResourceMappingProvider.tsx`.
+- Picker, mappings page, rendering: `app/frontend/src/resources/` (`useResourceBrowser.ts`, `ResourceBrowser.tsx`, `ResourcePickerDialog.tsx`, `ResourceMappingsPage.tsx`, `browserImageRenderer.ts`, `useBrowserImage.ts`, `useNearViewport.ts`, `fingerprints.ts`).
 - Crop capture and geometry: `app/frontend/src/scanstudio/`.
-- Contract tests: `app/backend/tests/test_resource_review.py`, `test_rfg_host.py`, and `test_thumbnails.py`.
-
-Primary browser lifecycle endpoints are `GET /api/resources/review`, `POST /api/resources/reconcile`, `POST /api/resources/ignore`, `POST /api/resources/unignore`, `POST /api/resources/rematch`, `POST /api/resources/release`, `POST /api/resources/fingerprints`, and `GET|HEAD /images/{virtual_path}`. The host still uses RFG's internal mapping/catalog and `/res/{virtual_path}` APIs, but resource review screens do not call those raw metadata endpoints.
+- Host routes: `app/backend/flightarchive/routes/api.py`; thumbnail relay: `app/backend/flightarchive/thumbnail.py`; legacy task projection: `app/backend/flightarchive/legacy_tasks.py`.

@@ -3,7 +3,15 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { Box, useTheme } from '@mui/material';
-import { resourceDisplayUrl } from '../rfg/api';
+import { useBrowserImage } from '../resources/useBrowserImage';
+import { useNearViewport } from '../resources/useNearViewport';
+
+function LogoImage({ resourcePath, alt, eager = false, enabled = true, onFailure, sx }: { resourcePath: string; alt: string; eager?: boolean; enabled?: boolean; onFailure(): void; sx: object }) {
+  const image = useBrowserImage(resourcePath, { maxDimension: 512, enabled });
+  useEffect(() => { if (image.status === 'failed') onFailure(); }, [image.status, onFailure]);
+  if (image.status !== 'ready') return null;
+  return <Box component="img" src={image.src} alt={alt} aria-hidden={alt ? undefined : true} loading={eager ? 'eager' : 'lazy'} onError={onFailure} sx={sx} />;
+}
 
 /** A symbol mark is always fitted inside a square, including when its host is round. */
 export function AirlineLogo({
@@ -19,6 +27,7 @@ export function AirlineLogo({
   width: number;
   height: number;
 }) {
+  const visibility = useNearViewport<HTMLElement>();
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [symbolLogoResourcePath]);
   const hasSymbol = Boolean(symbolLogoResourcePath) && !failed;
@@ -26,18 +35,17 @@ export function AirlineLogo({
 
   return (
     <Box
+      ref={visibility.ref}
       role="img"
       aria-label={label}
       sx={{ width, height, flex: '0 0 auto', display: 'grid', placeItems: 'center', overflow: 'hidden' }}
     >
       {hasSymbol ? (
-        <Box
-          component="img"
-          src={resourceDisplayUrl(symbolLogoResourcePath!)}
+        <LogoImage
+          resourcePath={symbolLogoResourcePath!}
           alt=""
-          aria-hidden
-          loading="lazy"
-          onError={() => setFailed(true)}
+          enabled={visibility.enabled}
+          onFailure={() => setFailed(true)}
           sx={{ width: side, height: side, objectFit: 'contain', display: 'block' }}
         />
       ) : (
@@ -67,32 +75,49 @@ export function AirlineHorizontalLogo({
   maxHeight?: number;
 }) {
   const theme = useTheme();
+  const visibility = useNearViewport<HTMLElement>();
   const sources = useMemo(() => {
     const paths = theme.palette.mode === 'dark'
       ? [horizontalDarkLogoResourcePath, horizontalLogoResourcePath]
       : [horizontalLogoResourcePath, horizontalDarkLogoResourcePath];
-    return paths.filter((path, index): path is string => Boolean(path) && paths.indexOf(path) === index).map(resourceDisplayUrl);
+    return paths.filter((path, index): path is string => Boolean(path) && paths.indexOf(path) === index);
   }, [horizontalDarkLogoResourcePath, horizontalLogoResourcePath, theme.palette.mode]);
   const [sourceIndex, setSourceIndex] = useState(0);
   useEffect(() => setSourceIndex(0), [sources]);
-  const src = sources[sourceIndex];
-  if (!src) return null;
+  const resourcePath = sources[sourceIndex];
 
   return (
     <Box
-      component="img"
-      src={src}
-      alt={label}
-      loading="eager"
-      onError={() => setSourceIndex((index) => index + 1)}
+      ref={visibility.ref}
+      aria-hidden={resourcePath ? undefined : true}
       sx={{
-        display: 'block',
-        width: '100%',
-        height: '100%',
-        maxWidth,
-        maxHeight,
-        objectFit: 'contain',
+        width: maxWidth,
+        height: maxHeight,
+        maxWidth: '100%',
+        maxHeight: '100%',
+        display: 'grid',
+        placeItems: 'center',
+        visibility: resourcePath ? 'visible' : 'hidden',
       }}
-    />
+    >
+      {resourcePath ? (
+        <LogoImage
+          key={resourcePath}
+          resourcePath={resourcePath}
+          alt={label}
+          eager
+          enabled={visibility.enabled}
+          onFailure={() => setSourceIndex((index) => index + 1)}
+          sx={{
+            display: 'block',
+            width: '100%',
+            height: '100%',
+            maxWidth,
+            maxHeight,
+            objectFit: 'contain',
+          }}
+        />
+      ) : null}
+    </Box>
   );
 }

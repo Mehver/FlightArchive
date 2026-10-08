@@ -4,8 +4,13 @@
 import { Box, Drawer } from '@mui/material';
 import { TasksPage } from './TasksPage';
 
-/** Reusable shell for the combined session activity and backend-task panel. */
-export function FeedbackDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
+/** Reusable shell for the combined session activity and backend history panel. */
+export function FeedbackDrawer({ open, onClose, observedActivityRevision, onActivityRead }: {
+  open: boolean;
+  onClose: () => void;
+  observedActivityRevision?: string | null;
+  onActivityRead?: (revision: string | null) => void;
+}) {
   return (
     <Drawer
       anchor="right"
@@ -15,7 +20,7 @@ export function FeedbackDrawer({ open, onClose }: { open: boolean; onClose: () =
     >
       {open ? (
         <Box sx={{ p: { xs: 2, sm: 2.5 }, minHeight: '100%' }}>
-          <TasksPage onClose={onClose} />
+          <TasksPage onClose={onClose} observedActivityRevision={observedActivityRevision} onActivityRead={onActivityRead} />
         </Box>
       ) : null}
     </Drawer>

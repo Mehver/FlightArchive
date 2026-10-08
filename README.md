@@ -9,15 +9,18 @@
 
 ## 1 Description
 
-FlightArchive is a containerized flight-history application written with Python, FastAPI, React 19, TypeScript, and Material UI. It uses [RemappableFileGateway](https://github.com/MehverLibs/remappable-file-gateway) (RFG) for read-only source discovery, virtual-path mappings, resource delivery, and hashes.
+FlightArchive is a self-hosted, single-user personal flight archive for a local machine or a trusted home/LAN network. It keeps your flight history, boarding-pass scans, and related files together in one private place you control, with no accounts and no cloud dependency.
 
-It follows these rules:
+It is written with Python, FastAPI, React 19, TypeScript, and Material UI, and ships as a single container. Your existing media folders are exposed read-only through [RemappableFileGateway](https://github.com/MehverLibs/remappable-file-gateway) (RFG), so FlightArchive references them without taking ownership of your files.
 
-- flight, catalog, and boarding-pass-layout data is atomically persisted by the backend
-- resources are selected from an RFG resource root and business records retain only classified virtual paths
-- resource mappings can be inspected and manually re-matched without editing virtual paths
-- thumbnails are disposable derived cache data; they never enter business data
-- fingerprint storage is limited to classified resources directly bound to saved flight boarding passes or attachments, or to a saved airline logo
+### Features
+
+- Browse your flight history in a list or card grid, and open per-flight details.
+- Add and edit flights, and maintain reference catalogs for airlines, airports, and aircraft types.
+- Crop boarding-pass scans and arrange paper passes on templates.
+- Link boarding-pass scans, airline logos, and other attachments to files in your resource folder.
+- Review resource mappings, ignore files you do not need, and reconnect moved files when sources go missing.
+- Import and export business data, and follow operations in the Activity & Tasks drawer.
 
 <table>
     <tr>
@@ -32,37 +35,7 @@ It follows these rules:
     </tr>
 </table>
 
-### 1.1 Resource Model
-
-RFG owns the read-only resource root and `<data>/rfg/mapping.json`. FlightArchive owns `<data>/flightarchive/v1/business-data.json`. A separate cache root stores rebuildable thumbnail objects and is never part of business data.
-
-### 1.2 Preview Configuration
-
-On first start, FlightArchive atomically seeds the restart-only, user-editable configuration file `<RFG_DATA_DIR>/flightarchive/v1/preview-config.json`. It is separate from both BusinessData and the disposable thumbnail cache. The file must be valid version 1 configuration; an invalid file blocks startup until it is corrected. Changes take effect only after restarting the backend.
-
-```json
-{
-  "schemaVersion": 1,
-  "thumbnails": {
-    "maxSourceBytes": 268435456,
-    "maxSourcePixels": 100000000,
-    "maxDimension": 512,
-    "quality": 82,
-    "jobConcurrency": 2
-  },
-  "rfg": {
-    "pillowImageMaxPixels": 100000000
-  }
-}
-```
-
-`thumbnails.maxSourceBytes` defaults to 256 MiB. Raising it, the source-pixel limit, or job concurrency can increase memory use; concurrent image work has a corresponding memory cost. Changing thumbnail settings invalidates and reprofiles the thumbnail cache.
-
-`rfg.pillowImageMaxPixels` is the only supported host-configurable RFG image safety setting. It is applied before RFG initializes and affects perceptual hashes. RFG ZIP guards, hash capacity, and internal thresholds are not configurable through this file.
-
-### 1.3 Current Features
-
-FlightArchive provides a responsive flight dashboard, flight and flight-reference (airline / airport / aircraft type) catalog editing, resource selection and classification, mapping review with ignore and re-match operations, business-bound resource fingerprints, and a boarding-pass crop & layout tool.
+How the pieces fit together is documented in [ARCHITECTURE.md](docs/ARCHITECTURE.md), [BUSINESS_DATA.md](docs/BUSINESS_DATA.md), and [RESOURCE_LIFECYCLE.md](docs/RESOURCE_LIFECYCLE.md).
 
 ## 2 Usage
 
@@ -83,8 +56,22 @@ docker run -d \
   -p 127.0.0.1:8080:8080/tcp \
   -v /path/for/resources:/resource:ro \
   -v /path/for/data:/data \
+  -v /path/for/cache:/cache \
    flightarchive:local
 ```
+
+Open http://localhost:8080 after the container starts.
+
+| Parameter | Function |
+| --- | --- |
+| `-p 127.0.0.1:8080:8080/tcp` | HTTP web interface |
+| `-v /path/for/resources:/resource:ro` | Your existing resource folder, mounted read-only |
+| `-v /path/for/data:/data` | FlightArchive data and resource mappings; keep this to preserve your archive |
+| `-v /path/for/cache:/cache` | Optional thumbnail cache; safe to delete and rebuild |
+
+Your archive is kept in `/data`; `/resource` is read-only. The optional `/cache` mount stores rebuildable thumbnails; without it, the cache stays inside the container.
+
+> FlightArchive has no authentication and is intended for one user on a local machine or a trusted LAN. Do not expose it to the public internet.
 
 **Published images:** Each published GitHub Release tag is used directly as the image tag (without version normalization) and also updates `latest`:
 
@@ -95,17 +82,6 @@ docker pull docker.io/mehver/flightarchive:<release-tag>
 
 Release assets also include separately loadable `linux/amd64` and `linux/arm64` Docker image tarballs.
 
-| Parameter | Function |
-| --- | --- |
-| `-p 127.0.0.1:8080:8080/tcp` | HTTP web interface |
-| `-v /path/for/resources:/resource:ro` | Existing RFG resource root, read-only |
-| `-v /path/for/data:/data` | RFG mapping and FlightArchive business data |
-| `-v /path/for/cache:/cache` | Optional rebuildable thumbnail cache |
-
-Open http://localhost:8080 after the container starts. Without the optional cache mount, `/cache` remains an ordinary disposable container directory.
-
-The Activity & Tasks drawer combines session-only operation feedback with background-task history grouped by log date; activity is not persisted across reloads. Task history is loaded only while the drawer is open, starts with the newest three existing log dates, loads older dates while scrolling, and polls only while an active task needs a fresh latest-page snapshot.
-
 ---
 
 **Docker Compose:**
@@ -115,75 +91,15 @@ cp app/.env.example app/.env
 docker compose --env-file app/.env -f app/compose.yaml up --build
 ```
 
-For a persistent or high-speed thumbnail cache, set `FLIGHTARCHIVE_CACHE_HOST_PATH` and run:
+For a persistent thumbnail cache, uncomment `FLIGHTARCHIVE_CACHE_HOST_PATH` in `app/.env` and add the optional override, which mounts only `/cache`:
 
 ```shell
 docker compose --env-file app/.env -f app/compose.yaml -f app/compose.cache-host.yaml up --build
 ```
 
-The override mounts only `/cache`; the resource mount remains read-only and the data mount retains RFG mapping and business state.
-
 ## 3 Development
 
-**Requirements**
-
-- [Docker](https://www.docker.com/)
-- [Node.js](https://nodejs.org/) v22 or later for frontend development
-- Python 3.10 or later for backend development and tests
-
-**Install Dependency**
-
-```shell
-cd app/frontend
-pnpm install
-
-cd ../backend
-python -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements-dev.txt
-```
-
-**Frontend Development**
-
-```shell
-cd app/frontend
-pnpm dev
-```
-
-**Frontend Compile**
-
-```shell
-cd app/frontend
-pnpm build
-```
-
-**Backend Server**
-
-```shell
-cd app/backend
-RFG_RESOURCE_PATH=/path/for/resources \
-RFG_DATA_DIR=/path/for/data \
-python -m flightarchive
-```
-
-**Tests / Typecheck**
-
-```shell
-cd app/backend
-python -m pytest tests -q
-
-cd ../frontend
-pnpm exec vitest run --maxWorkers=4
-pnpm typecheck
-```
-
-**Build Docker Image**
-
-```shell
-docker build -f app/Dockerfile -t flightarchive:local app
-```
-
-On Windows, `tools/BuildAll.bat` builds the same local image. `tools/BuildAndRunContainer.bat` is a Windows helper that cleans local build artifacts, prompts for host mappings, and starts a detached container. On other platforms, use the `docker run` command in [Usage](#2-usage).
+Developer setup, local run commands, and test instructions are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## 4 Built With
 
@@ -199,8 +115,6 @@ On Windows, `tools/BuildAll.bat` builds the same local image. `tools/BuildAndRun
     - [Material UI](https://github.com/mui/material-ui)
     - [Vitest](https://github.com/vitest-dev/vitest)
 - Docker
-  - `node:22-bookworm-slim`
-  - `python:3.14-slim`
 
 ## 5 License
 

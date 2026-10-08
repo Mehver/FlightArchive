@@ -2,17 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 /**
- * Pure helpers for the business-bound fingerprint workflow on the resource
- * mappings page.
- *
- * The backend (POST /api/resources/fingerprints) is authoritative: it only
- * hashes and persists fingerprints for currently cataloged, stable
- * objects referenced by a persisted flight's three boarding-pass fields or
- * attachmentResourcePaths, or by an airline-logo field. The resource mappings
- * page supplies global persisted-business reference counts so the UI never
- * offers a calculation the server would reject. Temporary rows and unreferenced
- * objects are never fingerprintable. No hash-based
- * candidate computation or matching happens here (or anywhere in the UI).
+ * Pure helpers for fingerprinting present stable RFG mappings.
  */
 
 import { HASH_ALGORITHMS, PERCEPTUAL_ALGORITHMS, type HashAlgorithm, type MappingEntry } from '../rfg/api';
@@ -33,31 +23,20 @@ export function supportedFingerprintAlgorithms(localPath: string): HashAlgorithm
 /** Backend request cap: at most this many virtual paths per fingerprint call. */
 export const FINGERPRINT_MAX_PATHS_PER_REQUEST = 32;
 
-export type FingerprintRowState =
-  | { kind: 'hidden' }
-  | { kind: 'unreferenced' }
-  | { kind: 'referenced'; referenceCount: number; calculable: boolean };
+export type FingerprintRowState = { kind: 'hidden' } | { kind: 'stable'; calculable: boolean };
 
 /**
- * Fingerprint affordance for one mapping row:
- * - `hidden`        — temporary or local-only rows: never show
- *   hashes or a hash action;
- * - `unreferenced`  — classified but not business-bound: visibly unreferenced,
- *   no action;
- * - `referenced`    — business-bound: show reference count and stored-hash
- *   presence; `calculable` only while the local source is still present
- *   (missing rows may display stored values but offer no calculation).
+ * Stable rows display hashes; only rows whose local source is present can be
+ * calculated. Temporary and local-only rows hide fingerprint controls.
  */
 export function fingerprintRowState(row: MappingRow): FingerprintRowState {
   if (row.kind === 'inbox' || row.kind === 'ignored' || row.kind === 'local_only' || !row.virtualPath || !row.entry) {
     return { kind: 'hidden' };
   }
-  const referenceCount = row.review.uses.length;
-  if (referenceCount === 0) return { kind: 'unreferenced' };
-  return { kind: 'referenced', referenceCount, calculable: row.review.capabilities.fingerprint };
+  return { kind: 'stable', calculable: row.resource.present };
 }
 
-/** One calculable target: a present, classified, business-bound entry. */
+/** One calculable target: a present stable entry. */
 export interface FingerprintTarget {
   virtualPath: string;
   localPath: string;
@@ -70,7 +49,7 @@ export interface FingerprintTarget {
 export function fingerprintTargets(rows: readonly MappingRow[]): FingerprintTarget[] {
   return rows.flatMap((row) => {
     const state = fingerprintRowState(row);
-    if (state.kind !== 'referenced' || !state.calculable || !row.virtualPath || !row.localPath || !row.entry) {
+    if (state.kind !== 'stable' || !state.calculable || !row.virtualPath || !row.localPath || !row.entry) {
       return [];
     }
     return [
@@ -78,7 +57,7 @@ export function fingerprintTargets(rows: readonly MappingRow[]): FingerprintTarg
         virtualPath: row.virtualPath,
         localPath: row.localPath,
         entry: row.entry,
-        stored: row.review.fingerprints,
+        stored: HASH_ALGORITHMS.filter((algorithm) => Boolean(row.entry?.[algorithm])),
         supported: supportedFingerprintAlgorithms(row.localPath),
       },
     ];
@@ -93,7 +72,7 @@ export function targetsMissingAlgorithms<T extends { stored: readonly HashAlgori
   return targets.filter((target) => algorithms.some((algorithm) => (target.supported?.includes(algorithm) ?? true) && !target.stored.includes(algorithm)));
 }
 
-/** Split virtual paths into request-sized chunks (backend cap). */
+/** Split virtual paths into small sequential calculation chunks. */
 export function chunkVirtualPaths(paths: readonly string[], size = FINGERPRINT_MAX_PATHS_PER_REQUEST): string[][] {
   const chunks: string[][] = [];
   for (let index = 0; index < paths.length; index += size) {

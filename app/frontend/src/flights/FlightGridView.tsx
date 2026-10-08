@@ -76,7 +76,6 @@ export function FlightGridView({ flights, airlineNames, airlines, airports, onOp
              <Box sx={{ p: 1.5, pb: 1.25 }}>
               <BoardingPassFrame
                 slot="paperBoardingPassFront"
-                flightId={flight.id}
                 resourcePath={slotResourcePath(flight, 'paperBoardingPassFront')}
                 layout={slotLayout(flight, 'paperBoardingPassFront')}
                 aspectRatio={DEFAULT_FRAME_ASPECT}

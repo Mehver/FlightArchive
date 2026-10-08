@@ -1,17 +1,23 @@
 // SPDX-FileCopyrightText: 2026 Mehver (https://github.com/Mehver)
 // SPDX-License-Identifier: BSD-3-Clause
 
-import { useMemo, useState, type ReactNode } from 'react';
+import { useMemo, useRef, useState, type ChangeEvent, type MouseEvent, type ReactNode } from 'react';
 import {
   AppBar,
+  Alert,
   Box,
+  Badge,
+  Chip,
   CssBaseline,
+  Divider,
   Drawer,
   IconButton,
   List,
   ListItemButton,
   ListItemIcon,
   ListItemText,
+  Menu,
+  MenuItem,
   ThemeProvider,
   Toolbar,
   Tooltip,
@@ -37,13 +43,142 @@ import { ReferenceLibraryPage } from './reference/ReferenceLibraryPage';
 import { ResourceMappingsPage } from './resources/ResourceMappingsPage';
 import { FeedbackDrawer } from './tasks/FeedbackDrawer';
 import { useTranslation } from './i18n';
+import { useBusinessData } from './domain/BusinessDataProvider';
 
 const DRAWER_WIDTH = 232;
 
 type PageKey = 'flights' | 'flightReference' | 'resourceMappings';
 
+export function BusinessDataActions() {
+  const { t } = useTranslation();
+  const business = useBusinessData();
+  const { connectivity, recheckConnection, showError } = useAppState();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
+  const failed = Object.entries(business.documents).filter(([, state]) => state.error);
+  const dirty = Object.entries(business.documents).filter(([, state]) => state.dirty);
+  const progress = business.saveAllProgress;
+  const savingDocument = Object.entries(business.documents).find(([, state]) => state.saving)?.[0]
+    ?? (progress.status === 'running' && progress.completed >= progress.total ? 'manifest.json' : null);
+  const saving = Object.values(business.documents).some((state) => state.saving || state.pending > 0)
+    || progress.status === 'running';
+  const menuOpen = Boolean(anchorEl);
+  const connectionLabel = t(`connection${connectivity[0].toUpperCase()}${connectivity.slice(1)}` as 'connectionChecking' | 'connectionOnline' | 'connectionOffline');
+  const triggerLabel = `${t('connectionStatus')}: ${connectionLabel}`;
+  const hasFailure = business.phase === 'error' || failed.length > 0 || progress.status === 'failed';
+  const hasWarning = !hasFailure && dirty.length > 0;
+
+  const saveAll = () => {
+    void business.saveAll().catch((error: unknown) => {
+      showError(error, t('businessDataSaveUnexpectedFailure'), { form: 'business-data' });
+    });
+  };
+
+  const retryFailed = () => {
+    if (progress.failed.includes('manifest.json')) {
+      saveAll();
+      return;
+    }
+    for (const [id] of failed) {
+      void business.retryDocument(id as keyof typeof business.documents).catch(() => undefined);
+    }
+  };
+
+  const closeMenu = () => setAnchorEl(null);
+  const dismissMenu = () => {
+    const trigger = anchorEl;
+    setAnchorEl(null);
+    queueMicrotask(() => trigger?.focus());
+  };
+  const openMenu = (event: MouseEvent<HTMLElement>) => setAnchorEl(event.currentTarget);
+
+  const importFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    try {
+      await business.importBusinessData(JSON.parse(await file.text()));
+    } catch (error) {
+      showError(error, t('businessDataImportFailed'), { form: 'business-data-import' });
+    }
+  };
+
+  return (
+    <>
+      <Tooltip title={triggerLabel}>
+        <IconButton
+          aria-label={triggerLabel}
+          aria-haspopup="menu"
+          aria-controls={menuOpen ? 'business-data-menu' : undefined}
+          aria-expanded={menuOpen ? 'true' : undefined}
+          color={connectivity === 'offline' ? 'error' : connectivity === 'checking' ? 'warning' : undefined}
+          onClick={openMenu}
+          sx={connectivity === 'online' ? { color: 'productAccent.main' } : undefined}
+        >
+          <Badge color={hasFailure ? 'error' : 'warning'} variant="dot" invisible={!hasFailure && !hasWarning}>
+            {connectivity === 'online' ? <CloudDoneOutlinedIcon /> : connectivity === 'offline' ? <CloudOffOutlinedIcon /> : <SyncOutlinedIcon />}
+          </Badge>
+        </IconButton>
+      </Tooltip>
+      <Menu
+        id="business-data-menu"
+        anchorEl={anchorEl}
+        open={menuOpen}
+        onClose={dismissMenu}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+        transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+      >
+        <Box sx={{ px: 2, py: 1, minWidth: 240 }}>
+          <Typography variant="subtitle2">{triggerLabel}</Typography>
+          {business.phase === 'error' ? <Chip sx={{ mt: 0.75 }} size="small" color="error" label={t('businessDataLoadFailed')} /> : null}
+          {dirty.length > 0 ? (
+            <Chip
+              sx={{ mt: 0.75, mr: 0.5 }}
+              size="small"
+              color={failed.length > 0 ? 'error' : 'warning'}
+              label={failed.length > 0 ? t('saveFailed', { count: failed.length }) : saving ? t('saving') : t('unsavedChanges', { count: dirty.length })}
+            />
+          ) : null}
+          {progress.status !== 'idle' ? (
+            <Tooltip title={progress.failed.length > 0 ? t('businessDataFailedDocuments', { documents: progress.failed.join(', ') }) : ''}>
+              <Chip
+                sx={{ mt: 0.75 }}
+                size="small"
+                color={progress.status === 'failed' ? 'error' : progress.status === 'succeeded' ? 'success' : 'info'}
+                label={progress.status === 'running'
+                  ? t('businessDataSavingProgress', { document: savingDocument ?? t('saving'), completed: progress.completed, total: progress.total })
+                  : progress.status === 'failed'
+                    ? t('businessDataSaveProgressFailed', { completed: progress.completed, total: progress.total })
+                    : t('businessDataSaveProgressSucceeded', { completed: progress.completed, total: progress.total })}
+              />
+            </Tooltip>
+          ) : null}
+        </Box>
+        <Divider />
+        <MenuItem onClick={saveAll} disabled={!business.data || saving}>{t('saveAll')}</MenuItem>
+        <MenuItem onClick={() => { closeMenu(); inputRef.current?.click(); }} disabled={!business.data}>{t('importData')}</MenuItem>
+        <MenuItem onClick={() => { closeMenu(); business.downloadBusinessData(); }} disabled={!business.data}>{t('exportData')}</MenuItem>
+        {failed.length > 0 || progress.status === 'failed' ? <MenuItem onClick={retryFailed} disabled={saving}>{t('retryFailed')}</MenuItem> : null}
+        <Divider />
+        <MenuItem onClick={() => { closeMenu(); void recheckConnection(); }}>{t('recheckConnection')}</MenuItem>
+      </Menu>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="application/json,.json"
+        hidden
+        onClick={(event) => { event.currentTarget.value = ''; }}
+        onChange={(event) => void importFile(event)}
+      />
+    </>
+  );
+}
+
 function Shell() {
-  const { connectivity, recheckConnection } = useAppState();
+  const {
+    observedActivityRevision, hasUnreadActivity, markActivityRead,
+  } = useAppState();
+  const { phase: businessPhase, loadError: businessLoadError } = useBusinessData();
   const { language, toggleLanguage, t } = useTranslation();
   const [page, setPage] = useState<PageKey>('flights');
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -120,24 +255,15 @@ function Shell() {
               alt="FlightArchive"
               sx={{ width: 32, height: 32, borderRadius: 1, objectFit: 'cover' }}
             />
-            <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
+            <Typography variant="h6" component="div" sx={{ flexGrow: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
               FlightArchive
             </Typography>
-            <Tooltip title={`${t('connectionStatus')}: ${t(`connection${connectivity[0].toUpperCase()}${connectivity.slice(1)}` as 'connectionChecking' | 'connectionOnline' | 'connectionOffline')}. ${t('recheckConnection')}`}>
-              <IconButton
-                aria-label={`${t('connectionStatus')}: ${t(`connection${connectivity[0].toUpperCase()}${connectivity.slice(1)}` as 'connectionChecking' | 'connectionOnline' | 'connectionOffline')}. ${t('recheckConnection')}`}
-                color={connectivity === 'offline' ? 'error' : connectivity === 'checking' ? 'warning' : undefined}
-                onClick={() => { void recheckConnection(); }}
-                sx={connectivity === 'online' ? {
-                  color: 'productAccent.main',
-                } : undefined}
-              >
-                {connectivity === 'online' ? <CloudDoneOutlinedIcon /> : connectivity === 'offline' ? <CloudOffOutlinedIcon /> : <SyncOutlinedIcon />}
-              </IconButton>
-            </Tooltip>
+            <BusinessDataActions />
             <Tooltip title={t('feedbackCenter')}>
               <IconButton aria-label={t('feedbackCenter')} onClick={() => setTasksOpen(true)}>
-                <NotificationsOutlinedIcon />
+                <Badge color="error" variant="dot" invisible={!hasUnreadActivity}>
+                  <NotificationsOutlinedIcon />
+                </Badge>
               </IconButton>
             </Tooltip>
             <Tooltip title={language === 'en' ? t('switchToChinese') : t('switchToEnglish')}>
@@ -189,7 +315,12 @@ function Shell() {
           </Drawer>
         )}
 
-        <FeedbackDrawer open={tasksOpen} onClose={() => setTasksOpen(false)} />
+        <FeedbackDrawer
+          open={tasksOpen}
+          onClose={() => setTasksOpen(false)}
+          observedActivityRevision={observedActivityRevision}
+          onActivityRead={markActivityRead}
+        />
 
         <Box
           component="main"
@@ -201,6 +332,9 @@ function Shell() {
           }}
         >
           <Toolbar />
+          {businessPhase === 'error' ? (
+            <Alert severity="error" sx={{ mt: 1 }}>{businessLoadError?.message ?? t('businessDataLoadFailed')}</Alert>
+          ) : null}
           {page === 'flights' ? <FlightsPage /> : null}
           {page === 'flightReference' ? <ReferenceLibraryPage /> : null}
           {page === 'resourceMappings' ? <ResourceMappingsPage /> : null}

@@ -24,15 +24,15 @@ export interface ResourcePickerDialogProps {
 }
 
 /** Dialog shell retaining the original picker API; browsing state and UI live in the reusable module. */
-export function ResourcePickerDialog({
+function OpenResourcePickerDialog({
   open, title, selected, multiple = false, imageOnly = false, selectable = 'all', allowedPaths, onConfirm, onClose,
 }: ResourcePickerDialogProps) {
   const { t } = useTranslation();
   const dialogScale = useDialogScale();
-  const filter = useMemo<ResourceBrowserFilter>(() => ({ entry, review }) =>
+  const filter = useMemo<ResourceBrowserFilter>(() => ({ entry, resource }) =>
     (selectable === 'inbox'
-      ? review.state === 'pending'
-      : review.state === 'pending' || review.state === 'mapped' || review.uses.length > 0 || selected.includes(entry.virtual_path))
+      ? resource.state === 'pending' && resource.present
+      : (resource.state === 'mapped' && resource.present) || (selected.includes(entry.virtual_path) && resource.state === 'missing'))
     && (!imageOnly || isImageResource(entry.virtual_path))
     && (!allowedPaths || allowedPaths.includes(entry.virtual_path)), [allowedPaths, imageOnly, selectable, selected]);
   const browser = useResourceBrowser({ active: open, initialSelected: selected, multiple, filter });
@@ -41,9 +41,13 @@ export function ResourcePickerDialog({
     <DialogTitle id="resource-picker-dialog-title">{title}</DialogTitle>
     <DialogContent dividers><ResourceBrowser browser={browser} label={title} multiple={multiple} /></DialogContent>
     <DialogActions>
-      {!multiple ? <Box sx={{ mr: 'auto' }}><Button onClick={() => void browser.ignore()} disabled={!browser.canIgnore || browser.ignoring}>{browser.ignoring ? t('resourceIgnoring') : t('resourceIgnore')}</Button></Box> : null}
+      {!multiple ? <Box sx={{ mr: 'auto' }} /> : null}
       <Button onClick={onClose}>{t('cancel')}</Button>
-      <Button variant="contained" disabled={!browser.picked.length || browser.ignoring} onClick={() => onConfirm(browser.picked)}>{t('resourceSelect')}</Button>
+      <Button variant="contained" disabled={!browser.picked.length} onClick={() => onConfirm(browser.picked)}>{t('resourceSelect')}</Button>
     </DialogActions>
   </Dialog>;
+}
+
+export function ResourcePickerDialog(props: ResourcePickerDialogProps) {
+  return props.open ? <OpenResourcePickerDialog {...props} /> : null;
 }

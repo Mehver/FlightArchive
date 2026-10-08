@@ -1,0 +1,191 @@
+{
+  "validDocument": {
+    "schemaVersion": 1,
+    "airlines": [
+      {
+        "code": "ZX",
+        "icao": "ZEX",
+        "nameZh": "",
+        "nameEn": "Zulu Express",
+        "alliance": null,
+        "horizontalLogoResourcePath": "objects/airlines/zx-horizontal.svg",
+        "horizontalDarkLogoResourcePath": null,
+        "symbolLogoResourcePath": null,
+        "brandColors": {"primary": "#123ABC", "contrast": null}
+      }
+    ],
+    "airports": [
+      {
+        "code": "QZX",
+        "icao": "ZQZX",
+        "nameZh": "",
+        "nameEn": "Example Airport",
+        "cityZh": "",
+        "cityEn": "Example City",
+        "countryZh": "",
+        "countryEn": "Example Country",
+        "terminals": ["T1", "T2"]
+      }
+    ],
+    "aircraftTypes": [
+      {"icao": "A320", "iata": "32N", "manufacturer": "Airbus", "displayName": "A320neo"}
+    ],
+    "flights": [
+      {
+        "id": "flight-1",
+        "flightNumber": "7",
+        "airlineCode": "ZX",
+        "departureAirport": "QZX",
+        "arrivalAirport": "PEK",
+        "departureTerminal": "T1",
+        "arrivalTerminal": null,
+        "departureDate": "2026-06-07",
+        "departureTime": "08:05",
+        "arrivalTime": null,
+        "aircraftTypeIcao": "A320",
+        "registration": "B-1234",
+        "seat": "12A",
+        "notes": "fixture flight",
+        "createdAt": "2026-01-01T00:00:00+00:00",
+        "updatedAt": "2026-01-01T00:00:00+00:00",
+        "paperBoardingPassFrontResourcePath": "objects/passes/front.png",
+        "paperBoardingPassBackResourcePath": null,
+        "electronicBoardingPassResourcePath": null,
+        "attachmentResourcePaths": ["objects/attachments/receipt.pdf"],
+        "paperBoardingPassLayouts": {
+          "paperBoardingPassFront": {
+            "schemaVersion": 1,
+            "algorithm": "canny",
+            "crop": {
+              "centerX": 320,
+              "centerY": 240,
+              "width": 300,
+              "height": 140,
+              "rotationDegrees": 2,
+              "corners": [{"x": 1, "y": 2}]
+            },
+            "templateId": "bp-main-stub.svg",
+            "placement": {"scale": 1, "rotationDegrees": 0, "offsetX": 0, "offsetY": 0}
+          }
+        },
+        "electronicBoardingPass": null,
+        "boardingPassColor": "#ABCDEF"
+      }
+    ],
+    "settings": {"locale": "zh-CN"}
+  },
+  "normalization": {
+    "flightInput": {
+      "flightNumber": " 42 ",
+      "airlineCode": " zx ",
+      "departureAirport": " qzx ",
+      "arrivalAirport": " pek ",
+      "departureDate": "2026-07-08",
+      "registration": " b-9876 ",
+      "attachmentResourcePaths": ["objects/a.pdf", "objects/a.pdf"]
+    },
+    "expected": {
+      "flightNumber": "42",
+      "airlineCode": "ZX",
+      "departureAirport": "QZX",
+      "arrivalAirport": "PEK",
+      "registration": "B-9876",
+      "seat": null,
+      "notes": "",
+      "attachmentResourcePaths": ["objects/a.pdf"]
+    },
+    "expectedFullFlight": {
+      "id": "generated-flight-id",
+      "flightNumber": "42",
+      "airlineCode": "ZX",
+      "departureAirport": "QZX",
+      "arrivalAirport": "PEK",
+      "departureTerminal": null,
+      "arrivalTerminal": null,
+      "departureDate": "2026-07-08",
+      "departureTime": null,
+      "arrivalTime": null,
+      "aircraftTypeIcao": null,
+      "registration": "B-9876",
+      "seat": null,
+      "notes": "",
+      "createdAt": "2026-08-09T10:11:12+00:00",
+      "updatedAt": "2026-08-09T10:11:12+00:00",
+      "paperBoardingPassFrontResourcePath": null,
+      "paperBoardingPassBackResourcePath": null,
+      "electronicBoardingPassResourcePath": null,
+      "attachmentResourcePaths": ["objects/a.pdf"],
+      "paperBoardingPassLayouts": {},
+      "electronicBoardingPass": null,
+      "boardingPassColor": null
+    }
+  },
+  "catalogNormalization": {
+    "airlineInput": {"code": " zx ", "nameEn": " Zulu Air ", "unknownFutureField": "ignored"},
+    "airlineExpected": {"code": "ZX", "icao": "", "nameZh": "", "nameEn": "Zulu Air", "alliance": null, "horizontalLogoResourcePath": null, "horizontalDarkLogoResourcePath": null, "symbolLogoResourcePath": null, "brandColors": {"primary": null, "contrast": null}},
+    "airportInput": {"code": " qzx ", "nameEn": " Example Airport ", "terminals": [" T1 ", "T1", "", 9], "unknownFutureField": true},
+    "airportExpected": {"code": "QZX", "icao": "", "nameZh": "", "nameEn": "Example Airport", "cityZh": "", "cityEn": "", "countryZh": "", "countryEn": "", "terminals": ["T1"]},
+    "aircraftTypeInput": {"icao": " a320 ", "displayName": " A320 ", "manufacturer": "   "},
+    "aircraftTypeExpected": {"icao": "A320", "iata": "", "manufacturer": null, "displayName": "A320"}
+  },
+  "updateCases": {
+    "clearLayouts": {"paperBoardingPassLayouts": {}},
+    "unknownFieldsIgnored": {"notes": "kept update", "futureFlightField": "ignored"}
+  },
+  "electronicExtractionCases": [
+    {"name": "missing-preset", "value": {"schemaVersion": 1, "extraction": {"crop": {"centerX": 1}}}},
+    {"name": "empty-preset", "value": {"schemaVersion": 1, "extraction": {"crop": {"centerX": 1}, "presetName": "   "}}},
+    {"name": "too-long-preset", "value": {"schemaVersion": 1, "extraction": {"crop": {"centerX": 1}, "presetName": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}}
+  ],
+  "validElectronicExtraction": {"schemaVersion": 1, "extraction": {"crop": {"centerX": 1}, "presetName": " Home Screen "}},
+  "rawValidation": {
+    "invalidAirlineColor": {"code": "ZY", "nameEn": "Color Air", "brandColors": {"primary": "red", "contrast": null}},
+    "invalidFlightColor": "red",
+    "nonStringResource": 42
+  },
+  "settingsNormalization": {
+    "input": {"locale": "zh-CN", "numeric": 7, "empty": ""},
+    "expected": {"locale": "zh-CN", "empty": ""}
+  },
+  "duplicateNormalization": {
+    "input": {
+      "airlineCodes": ["ZX", "AA", "ZX"],
+      "airportCodes": ["QZX", "AAA", "QZX"],
+      "aircraftIcaos": ["A320", "B738", "A320"],
+      "flights": [
+        {"id": "late", "departureDate": "2026-09-01", "departureTime": null},
+        {"id": "same", "departureDate": "2026-01-01", "departureTime": "09:00"},
+        {"id": "same", "departureDate": "2026-01-01", "departureTime": "08:00"}
+      ]
+    },
+    "expected": {
+      "airlineCodes": ["AA", "ZX"],
+      "airportCodes": ["AAA", "QZX"],
+      "aircraftIcaos": ["A320", "B738"],
+      "flightKeys": ["2026-01-01|08:00|same", "2026-09-01||late"]
+    }
+  },
+  "limits": {"string": 128, "terminalItems": 32, "terminalString": 64, "settingsKey": 128, "settingsValue": 4096, "attachments": 32, "resourcePath": 512},
+  "invalidFlightInputs": [
+    {"name": "unsafe-attachment", "value": {"flightNumber": "1", "airlineCode": "ZX", "departureAirport": "QZX", "arrivalAirport": "PEK", "departureDate": "2026-07-08", "attachmentResourcePaths": ["../private.txt"]}},
+    {"name": "non-array-attachments", "value": {"flightNumber": "1", "airlineCode": "ZX", "departureAirport": "QZX", "arrivalAirport": "PEK", "departureDate": "2026-07-08", "attachmentResourcePaths": "objects/a.pdf"}},
+    {"name": "unsupported-flight-field", "value": {"flightNumber": "1", "airlineCode": "ZX", "departureAirport": "QZX", "arrivalAirport": "PEK", "departureDate": "2026-07-08", "boardingPassPrimaryColor": "#FFFFFF"}}
+  ],
+  "invalidDocuments": [
+    {"name": "non-object", "value": []},
+    {"name": "wrong-version", "value": {"schemaVersion": 2, "airlines": [], "airports": [], "aircraftTypes": [], "flights": [], "settings": {}}},
+    {"name": "missing-settings", "value": {"schemaVersion": 1, "airlines": [], "airports": [], "aircraftTypes": [], "flights": []}},
+    {"name": "unsupported-aircraft-field", "value": {"schemaVersion": 1, "airlines": [], "airports": [], "aircraftTypes": [{"icao": "A320", "displayName": "A320", "obsoleteManufacturer": "Legacy"}], "flights": [], "settings": {}}},
+    {"name": "temporary-resource", "value": {"schemaVersion": 1, "airlines": [], "airports": [], "aircraftTypes": [], "flights": [{"paperBoardingPassFrontResourcePath": "inbox/pass.png"}], "settings": {}}}
+  ],
+  "layoutMutation": {
+    "flightId": "flight-1",
+    "changes": {"paperBoardingPassFrontResourcePath": "objects/passes/replacement.png"},
+    "removedLayout": "paperBoardingPassFront"
+  },
+  "catalogCrud": {
+    "merge": {"kind": "airlines", "key": "ZX", "changes": {"nameEn": "Zulu Airways"}, "preservedField": "icao", "preservedValue": "ZEX"},
+    "referencedDelete": {"kind": "airlines", "keys": [" zx ", "ZX"], "force": false},
+    "forcedDelete": {"kind": "airlines", "keys": [" zx ", "ZX"], "force": true}
+  }
+}

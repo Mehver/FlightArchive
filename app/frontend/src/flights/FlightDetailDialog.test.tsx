@@ -16,10 +16,17 @@
 
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, within } from '@testing-library/react';
 import type { Catalogs, FlightRecord } from '../api/types';
 import { LanguageProvider } from '../i18n';
+
+vi.mock('../resources/useBrowserImage', () => ({
+  useBrowserImage: (path: string | null, options?: { crop?: unknown }) => path
+    ? { status: 'ready', src: path.endsWith('.svg') ? `/res/${path}` : `${options?.crop ? 'blob:crop-' : 'blob:thumbnail-'}${path}` }
+    : { status: 'failed', src: null },
+}));
+
 import { FlightDetailDialog } from './FlightDetailDialog';
 
 afterEach(cleanup);
@@ -210,7 +217,7 @@ describe('FlightDetailDialog files', () => {
     const list = screen.getByRole('list');
     const images = Array.from(list.querySelectorAll('img'));
     expect(images).toHaveLength(1);
-    expect(images[0].getAttribute('src')).toBe('/images/objects/front.png');
+    expect(images[0].getAttribute('src')).toBe('blob:thumbnail-objects/front.png');
     expect(within(list).getAllByTestId('InsertDriveFileOutlinedIcon')).toHaveLength(2);
   });
 
@@ -229,7 +236,7 @@ describe('FlightDetailDialog files', () => {
 
      const row = screen.getByText('mobile-pass.png').closest('li')!;
      const image = within(row).getByRole('img', { name: 'mobile-pass.png' });
-     expect(image.getAttribute('src')).toBe('/images/objects/mobile-pass.png');
+     expect(image.getAttribute('src')).toBe('blob:thumbnail-objects/mobile-pass.png');
      expect(within(row).getByText('Saved Layout')).toBeTruthy();
      expect(screen.getByRole('group', { name: 'Boarding Pass Color' }).querySelectorAll('[aria-hidden="true"]')).toHaveLength(1);
   });

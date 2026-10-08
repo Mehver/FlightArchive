@@ -12,12 +12,15 @@ import { ScanStudioDialog } from './ScanStudioDialog';
 const mocks = vi.hoisted(() => ({
   crop: vi.fn(),
   updateFlight: vi.fn(),
+  loadBoundedSource: vi.fn(),
+  assertDecodedLimits: vi.fn(),
 }));
 
-vi.mock('../api/client', () => ({
-  api: { updateFlight: mocks.updateFlight },
+vi.mock('../domain/BusinessDataProvider', () => ({
+  useBusinessData: () => ({ data: { flights: [] }, updateFlight: mocks.updateFlight, saveDocument: vi.fn().mockResolvedValue({ ok: true }) }),
 }));
-vi.mock('../rfg/api', () => ({ resourceUrl: (path: string) => `/images/${path}` }));
+vi.mock('../rfg/api', () => ({ resourceUrl: (path: string) => `/res/${path}` }));
+vi.mock('../resources/browserImageRenderer', () => ({ loadBoundedSource: mocks.loadBoundedSource, assertDecodedLimits: mocks.assertDecodedLimits }));
 vi.mock('../state/AppState', () => ({
   useAppState: () => ({ notify: vi.fn(), showError: vi.fn() }),
 }));
@@ -92,7 +95,8 @@ beforeEach(() => {
     releasePointerCapture: { configurable: true, value: vi.fn() },
   });
   mocks.crop.mockResolvedValue({ blob: new Blob(['crop']), width: 100, height: 50 });
-  mocks.updateFlight.mockResolvedValue({ flight: flight() });
+  mocks.loadBoundedSource.mockResolvedValue(new Blob(['source']));
+  mocks.updateFlight.mockReturnValue(flight());
 });
 
 afterEach(() => {
@@ -102,6 +106,29 @@ afterEach(() => {
 });
 
 describe('ScanStudioDialog rotated-rectangle workflow', () => {
+  it('shows a bounded-source rejection without assigning an image URL', async () => {
+    mocks.loadBoundedSource.mockRejectedValueOnce(new Error('source-too-large'));
+    renderDialog(flight());
+    expect(await screen.findByText(/could not load the bound image/i)).not.toBeNull();
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it('does not publish a stale blob URL after the studio is unmounted', async () => {
+    let resolve!: (blob: Blob) => void;
+    mocks.loadBoundedSource.mockReturnValueOnce(new Promise<Blob>((done) => { resolve = done; }));
+    const view = renderDialog(flight());
+    view.unmount();
+    resolve(new Blob(['late']));
+    await Promise.resolve();
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it('revokes the bounded source URL when the studio closes', async () => {
+    const view = renderDialog(flight());
+    await screen.findByRole('img', { name: 'Crop editor canvas' });
+    view.unmount();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:crop');
+  });
   it('restores a legacy layout from its summary and exposes an independent magnifier', async () => {
     const legacy = layout({ centerX: 200, centerY: 100, width: 160, height: 80, rotationDegrees: 15, corners: [{ x: -1, y: -1 }] });
     renderDialog(flight(legacy));

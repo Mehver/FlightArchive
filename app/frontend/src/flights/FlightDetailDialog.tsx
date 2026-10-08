@@ -67,7 +67,7 @@ function flightFileRows(flight: FlightRecord): FlightFileRow[] {
   return rows;
 }
 
-/** Small row preview: images render their cached thumbnail, every non-image
+/** Small row preview: images render a bounded browser thumbnail, every non-image
  *  file shows the same centred generic file icon as the resource picker. */
 function FileRowPreview({ path }: { path: string }) {
   if (isImageResource(path)) return <ResourceImage resourcePath={path} size={40} alt={basename(path)} />;
@@ -274,7 +274,6 @@ export function FlightDetailDialog({
                 {resourcePath ? (
                   <BoardingPassFrame
                     slot={slot}
-                    flightId={flight.id}
                     resourcePath={resourcePath}
                     layout={slotLayout(flight, slot)}
                     layered={false}

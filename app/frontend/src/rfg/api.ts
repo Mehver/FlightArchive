@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Mehver (https://github.com/Mehver)
 // SPDX-License-Identifier: BSD-3-Clause
 
-/** Minimal same-origin RFG client, adapted from remappable-file-gateway demo. */
+/** Minimal same-origin client for RFG's documented public HTTP API. */
 
 /** The six hash algorithms RFG can compute, mirrored from its hash API and
  *  exactly the set the FlightArchive fingerprint endpoint accepts. */
@@ -16,32 +16,79 @@ export interface MappingEntry {
   virtual_path: string;
   local_path: string;
   size_bytes?: number | null;
-  /** Fingerprints persisted by POST /api/resources/fingerprints. They only
-   *  appear on object entries referenced by persisted flight resources
-   *  (boarding passes / attachments) or airline logos, never on inbox
-   *  entries. Absent when no fingerprint has been stored. */
-  crc32?: string;
-  md5?: string;
-  sha256?: string;
-  ahash?: string;
-  dhash?: string;
-  phash?: string;
+  crc32?: string | null;
+  md5?: string | null;
+  sha256?: string | null;
+  ahash?: string | null;
+  dhash?: string | null;
+  phash?: string | null;
 }
+
+export interface LocalFile { local_path: string; size_bytes: number }
+export interface LocalCatalog { local_files: LocalFile[] }
+export interface MappingDocument { entries: MappingEntry[] }
+export interface MappingSnapshot { document: MappingDocument; etag: string | null }
+export interface HashRequest { local_path: string; algorithm: HashAlgorithm }
+export interface HashFailure { code: string; message: string; retryable: boolean }
+export type HashTerminalResult = {
+  local_path: string;
+  algorithm: HashAlgorithm;
+  profile: string | null;
+  code: string;
+  detail: string | null;
+} & ({ status: 'succeeded'; value: string; error: null } | { status: 'failed'; value: null; error: HashFailure });
+
+export class RfgHttpError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+    this.name = 'RfgHttpError';
+  }
+}
+
+export interface RfgClient {
+  getCatalog(signal?: AbortSignal): Promise<LocalCatalog>;
+  getMapping(signal?: AbortSignal): Promise<MappingSnapshot>;
+  putMapping(document: MappingDocument, signal?: AbortSignal): Promise<MappingDocument>;
+  computeHash(request: HashRequest, signal?: AbortSignal): Promise<HashTerminalResult>;
+  getResource(virtualPath: string, init?: RequestInit): Promise<Response>;
+  headResource(virtualPath: string, init?: RequestInit): Promise<Response>;
+}
+
+async function jsonRequest<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, init);
+  if (!response.ok) {
+    let message = `RFG request failed (${response.status})`;
+    try {
+      const body = await response.json() as { detail?: string };
+      if (body.detail) message = body.detail;
+    } catch { /* RFG resource and proxy errors need not be JSON. */ }
+    throw new RfgHttpError(response.status, message);
+  }
+  return await response.json() as T;
+}
+
+export const rfgClient: RfgClient = {
+  getCatalog: (signal) => jsonRequest<LocalCatalog>('/api/v1/meta/local', { signal }),
+  async getMapping(signal) {
+    const response = await fetch('/api/v1/meta/map', { signal });
+    if (!response.ok) throw new RfgHttpError(response.status, `RFG mapping request failed (${response.status})`);
+    return { document: await response.json() as MappingDocument, etag: response.headers.get('ETag') };
+  },
+  putMapping: (document, signal) => jsonRequest<MappingDocument>('/api/v1/meta/map', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(document), signal,
+  }),
+  computeHash: (request, signal) => jsonRequest<HashTerminalResult>('/api/v1/hashes', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request), signal,
+  }),
+  getResource: (virtualPath, init) => fetch(resourceUrl(virtualPath), { ...init, method: 'GET' }),
+  headResource: (virtualPath, init) => fetch(resourceUrl(virtualPath), { ...init, method: 'HEAD' }),
+};
 export function resourceUrl(virtualPath: string): string {
   return `/res/${virtualPath.split('/').map(encodeURIComponent).join('/')}`;
 }
 
-/** Cached WebP thumbnail route for raster images; unsupported resources get
- *  an error response (e.g. 415) and callers must NOT fall back to
- *  {@link resourceUrl} for rasters — only SVG paths are served directly. */
-export function imageUrl(virtualPath: string): string {
-  return `/images/${virtualPath.split('/').map(encodeURIComponent).join('/')}`;
-}
-
-const SVG_PATH = /\.svg$/i;
-
-/** Returns the appropriate display URL for a resource.
- *  SVG files use the original route; raster files use the cached thumbnail route. */
-export function resourceDisplayUrl(virtualPath: string): string {
-  return SVG_PATH.test(virtualPath) ? resourceUrl(virtualPath) : imageUrl(virtualPath);
+/** Domain-neutral backend thumbnail relay. Raster display must use this route,
+ * while explicit downloads and studio editing continue to use resourceUrl. */
+export function thumbnailUrl(virtualPath: string, scale: number): string {
+  return `/api/thumbnails/${virtualPath.split('/').map(encodeURIComponent).join('/')}?scale=${scale}`;
 }

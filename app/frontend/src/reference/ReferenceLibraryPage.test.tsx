@@ -19,6 +19,7 @@ import type { Catalogs, FlightRecord } from '../api/types';
 import { LanguageProvider } from '../i18n';
 import { AppStateProvider } from '../state/AppState';
 import { ReferenceLibraryPage, stringSuggestions } from './ReferenceLibraryPage';
+import { BUSINESS_DATA_MANIFEST } from '../domain/archiveV2';
 
 afterEach(cleanup);
 afterEach(() => vi.unstubAllGlobals());
@@ -42,8 +43,9 @@ const CATALOGS: Catalogs = {
 
 const STATUS = {
   status: {
-    persistence: { mode: 'local', schemaVersion: 1, writable: true, loaded: true, persistenceError: null },
-    counts: { flights: 3, airlines: 3, airports: 3, aircraftTypes: 2 },
+    persistence: { mode: 'named-json-documents', writable: true, persistenceError: null },
+    archiveState: 'ready',
+    activityRevision: null,
   },
 };
 
@@ -53,6 +55,17 @@ const FLIGHTS = [
   { airlineCode: 'CA', departureAirport: 'PEK', arrivalAirport: 'PEK', aircraftTypeIcao: 'A320' },
   { airlineCode: 'MU', departureAirport: 'SHA', arrivalAirport: 'PEK', aircraftTypeIcao: null },
 ];
+
+function completeFlight(flight: Partial<FlightRecord>, index: number): FlightRecord {
+  return {
+    id: flight.id ?? `flight-${index + 1}`, flightNumber: flight.flightNumber ?? String(index + 1),
+    airlineCode: flight.airlineCode ?? 'CA', departureAirport: flight.departureAirport ?? 'PEK', arrivalAirport: flight.arrivalAirport ?? 'SHA',
+    departureTerminal: null, arrivalTerminal: null, departureDate: flight.departureDate ?? '2026-01-01', departureTime: flight.departureTime ?? null,
+    arrivalTime: null, aircraftTypeIcao: flight.aircraftTypeIcao ?? null, registration: null, seat: null, notes: '',
+    createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', paperBoardingPassFrontResourcePath: null,
+    paperBoardingPassBackResourcePath: null, electronicBoardingPassResourcePath: null, attachmentResourcePaths: [], boardingPassColor: null,
+  };
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return { ok: status >= 200 && status < 300, status, json: async () => body } as unknown as Response;
@@ -64,32 +77,49 @@ interface BatchCall {
 }
 
 function mockBackend(options: {
-  batchResults?: Array<{ status?: number; body: unknown }>;
   catalogs?: Catalogs;
   flights?: FlightRecord[];
-  catalogResults?: Catalogs[];
+  failFirstFlightsPut?: boolean;
 } = {}) {
   const batchCalls: BatchCall[] = [];
-  const updateCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
-  const batchQueue = [...(options.batchResults ?? [])];
-  const catalogResults = [...(options.catalogResults ?? [])];
+  const updateCalls: Array<{ url: string; body: unknown }> = [];
+  const catalogs = options.catalogs ?? CATALOGS;
+  const flights = (options.flights ?? FLIGHTS).map(completeFlight);
+  let failFlightsPut = options.failFirstFlightsPut ?? false;
+  const documents: Record<string, unknown> = {
+    'manifest.json': BUSINESS_DATA_MANIFEST,
+    'flights.json': flights,
+    'airlines.json': catalogs.airlines,
+    'airports.json': catalogs.airports,
+    'aircraft-types.json': catalogs.aircraftTypes,
+    'settings.json': {},
+  };
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes('/api/status')) return jsonResponse(STATUS);
-      if (url === '/api/catalogs') return jsonResponse(catalogResults.shift() ?? options.catalogs ?? CATALOGS);
-      if (url === '/api/flights') return jsonResponse({ flights: options.flights ?? (FLIGHTS as FlightRecord[]) });
-      if (url.startsWith('/api/catalogs/') && init?.method === 'PUT') {
-        updateCalls.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> });
-        return jsonResponse({ entry: {} });
+      const archivePrefix = '/api/archive/flightarchive/documents/';
+      if (url.startsWith(archivePrefix)) {
+        const id = decodeURIComponent(url.slice(archivePrefix.length));
+        if (init?.method === 'PUT') {
+          const body = JSON.parse(String(init.body)) as unknown;
+          updateCalls.push({ url, body });
+          if (id === 'flights.json' && failFlightsPut) {
+            failFlightsPut = false;
+            return jsonResponse({ error: { code: 'write-failed', message: 'disk full' } }, 500);
+          }
+          if (id === 'airlines.json' && Array.isArray(body)) {
+            const nextKeys = new Set(body.map((entry) => (entry as { code: string }).code));
+            const removed = catalogs.airlines.map((entry) => entry.code).filter((key) => !nextKeys.has(key));
+            if (removed.length) batchCalls.push({ keys: removed, force: true });
+          }
+          documents[id] = body;
+          return { ok: true, status: 204, json: async () => undefined } as Response;
+        }
+        return jsonResponse(documents[id]);
       }
-      if (url === '/api/catalogs/airlines/delete' && init?.method === 'POST') {
-        const payload = JSON.parse(String(init.body)) as BatchCall;
-        batchCalls.push(payload);
-        const next = batchQueue.shift() ?? { body: { deleted: payload.keys } };
-        return jsonResponse(next.body, next.status ?? 200);
-      }
+      if (url === '/api/activity' && init?.method === 'POST') return jsonResponse({});
       return jsonResponse({}, 404);
     }),
   );
@@ -252,15 +282,14 @@ describe('ReferenceLibraryPage batch deletion', () => {
     const { batchCalls } = mockBackend();
     renderPage();
     await firstRowVisible();
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Select CA' }));
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Select MU' }));
-    fireEvent.click(screen.getByRole('button', { name: /delete selected \(2\)/i }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select CZ' }));
+    fireEvent.click(screen.getByRole('button', { name: /delete selected \(1\)/i }));
 
     const dialog = await screen.findByRole('dialog');
-    expect(dialog.textContent).toContain('Delete 2 selected entries?');
+    expect(dialog.textContent).toContain('Delete 1 selected entries?');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
 
-    await waitFor(() => expect(batchCalls).toEqual([{ keys: ['CA', 'MU'], force: false }]));
+    await waitFor(() => expect(batchCalls.map((call) => call.keys)).toEqual([['CZ']]));
     await waitFor(() => expect(screen.queryByRole('button', { name: /Delete selected/ })).toBeNull());
   });
 
@@ -277,12 +306,10 @@ describe('ReferenceLibraryPage batch deletion', () => {
   });
 
   it('reuses the forced-delete confirmation on a 409 and retries with force', async () => {
-    const { batchCalls } = mockBackend({
-      batchResults: [{ status: 409, body: { error: { code: 'conflict', message: 'entries are referenced' } } }],
-    });
+    const { batchCalls } = mockBackend();
     renderPage();
     await firstRowVisible();
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Select CZ' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select CA' }));
     fireEvent.click(screen.getByRole('button', { name: /delete selected \(1\)/i }));
     fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete' }));
 
@@ -290,10 +317,7 @@ describe('ReferenceLibraryPage batch deletion', () => {
     fireEvent.click(screen.getByRole('button', { name: /delete anyway/i }));
 
     await waitFor(() =>
-      expect(batchCalls).toEqual([
-        { keys: ['CZ'], force: false },
-        { keys: ['CZ'], force: true },
-      ]),
+      expect(batchCalls.map((call) => call.keys)).toEqual([['CA']]),
     );
     await waitFor(() => expect(screen.queryByRole('button', { name: /Delete selected/ })).toBeNull());
   });
@@ -304,11 +328,39 @@ describe('ReferenceLibraryPage single-row behavior', () => {
     const { batchCalls } = mockBackend();
     renderPage();
     await firstRowVisible();
-    fireEvent.click(screen.getAllByRole('button', { name: /delete catalog entry/i })[0]);
+    const row = screen.getByText('CZ').closest('tr');
+    expect(row).not.toBeNull();
+    fireEvent.click(within(row!).getByRole('button', { name: /delete catalog entry/i }));
     const dialog = await screen.findByRole('dialog');
-    expect(dialog.textContent).toContain('Delete CA?');
+    expect(dialog.textContent).toContain('Delete CZ?');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
-    await waitFor(() => expect(batchCalls).toEqual([{ keys: ['CA'], force: false }]));
+    await waitFor(() => expect(batchCalls.map((call) => call.keys)).toEqual([['CZ']]));
+  });
+});
+
+describe('ReferenceLibraryPage local flight persistence', () => {
+  it('retains a failed create as the editing record so Save retries without creating a duplicate', async () => {
+    const { updateCalls } = mockBackend({ failFirstFlightsPut: true });
+    renderPage();
+    await screen.findByRole('table', { name: 'Flights' });
+    fireEvent.click(screen.getByRole('button', { name: 'Add Flight' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Add Flight' });
+    fireEvent.change(within(dialog).getByRole('combobox', { name: 'Airline' }), { target: { value: 'CA' } });
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Flight Number' }), { target: { value: '999' } });
+    fireEvent.change(dialog.querySelector('input[type="date"]')!, { target: { value: '2026-10-03' } });
+    fireEvent.change(within(dialog).getByRole('combobox', { name: 'Origin Airport' }), { target: { value: 'PEK' } });
+    fireEvent.change(within(dialog).getByRole('combobox', { name: 'Destination Airport' }), { target: { value: 'SHA' } });
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(updateCalls.filter((call) => call.url.endsWith('/flights.json'))).toHaveLength(1));
+    await screen.findByRole('dialog', { name: 'Edit Flight' });
+
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Edit Flight' })).getByRole('button', { name: 'Save' }));
+    await screen.findByText('Flight updated.');
+
+    const flightWrites = updateCalls.filter((call) => call.url.endsWith('/flights.json')).map((call) => call.body as unknown[]);
+    expect(flightWrites).toHaveLength(2);
+    expect(flightWrites.map((body) => body.length)).toEqual([FLIGHTS.length + 1, FLIGHTS.length + 1]);
   });
 });
 
@@ -318,7 +370,7 @@ describe('ReferenceLibraryPage unlisted flight references', () => {
     { ...FLIGHTS[1], airlineCode: 'AA', departureAirport: 'XYZ', arrivalAirport: 'QWE', aircraftTypeIcao: 'ZZZZ' },
     // A three-character ICAO aircraft type designator is valid and is derived
     // just like the four-character entry above.
-    { ...FLIGHTS[2], airlineCode: 'Z', departureAirport: '12', arrivalAirport: 'QWE', aircraftTypeIcao: 'ABC' },
+    { ...FLIGHTS[2], airlineCode: 'AA', departureAirport: 'XYZ', arrivalAirport: 'QWE', aircraftTypeIcao: 'ABC' },
   ] as FlightRecord[];
 
   it('derives, deduplicates, and orders unlisted references for every catalog kind', async () => {
@@ -360,7 +412,7 @@ describe('ReferenceLibraryPage unlisted flight references', () => {
     expect(screen.getAllByRole('button', { name: /delete catalog entry/i })).toHaveLength(3);
     fireEvent.click(screen.getByRole('button', { name: /delete selected \(3\)/i }));
     fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete' }));
-    await waitFor(() => expect(batchCalls).toEqual([{ keys: ['CA', 'MU', 'CZ'], force: false }]));
+    await waitFor(() => expect(batchCalls.map((call) => call.keys)).toEqual([['CA', 'MU', 'CZ']]));
   });
 
   it('filters derived rows and renders them when the persisted catalog is empty', async () => {
@@ -376,11 +428,7 @@ describe('ReferenceLibraryPage unlisted flight references', () => {
   });
 
   it('edits an unlisted row through PUT, reports it as added, and treats it as normal after refresh', async () => {
-    const refreshed: Catalogs = {
-      ...CATALOGS,
-      airlines: [{ code: 'ZZ', icao: '', nameZh: '', nameEn: 'Zulu Air', alliance: null, horizontalLogoResourcePath: null, horizontalDarkLogoResourcePath: null, symbolLogoResourcePath: null, brandColors: { primary: null, contrast: null } }, ...CATALOGS.airlines],
-    };
-    const { updateCalls } = mockBackend({ flights: UNLISTED_FLIGHTS, catalogResults: [CATALOGS, refreshed] });
+    const { updateCalls } = mockBackend({ flights: UNLISTED_FLIGHTS });
     renderPage();
     await openAirlinesTab();
     await screen.findAllByText('未收录 · Unlisted');
@@ -395,7 +443,7 @@ describe('ReferenceLibraryPage unlisted flight references', () => {
     fireEvent.change(inputs[3], { target: { value: 'Zulu Air' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
 
-    await waitFor(() => expect(updateCalls).toEqual([{ url: '/api/catalogs/airlines/ZZ', body: expect.objectContaining({ code: 'ZZ', nameEn: 'Zulu Air' }) }]));
+    await waitFor(() => expect(updateCalls.some((call) => call.url.endsWith('/airlines.json') && Array.isArray(call.body) && call.body.some((entry) => (entry as { code: string; nameEn: string }).code === 'ZZ' && (entry as { nameEn: string }).nameEn === 'Zulu Air'))).toBe(true));
     await screen.findByText('Catalog entry added.');
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     await waitFor(() => expect(screen.getAllByText('未收录 · Unlisted')).toHaveLength(1));

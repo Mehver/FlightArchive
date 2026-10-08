@@ -27,7 +27,7 @@ function Inspector() {
   const { records, showError } = useFeedback();
   return (
     <>
-      <button onClick={() => showError(new ApiError(503, 'resource-committed-refresh-failed', 'refresh failed'))}>B4</button>
+      <button onClick={() => showError(new ApiError(503, 'request-failed', 'refresh failed'))}>API</button>
       <output data-testid="records">{JSON.stringify(records)}</output>
     </>
   );
@@ -93,17 +93,17 @@ describe('FeedbackProvider', () => {
     expect(records[199].message).toBe('Saved 5.');
   });
 
-  it('records errors and gives B4 a committed-but-unconfirmed explanation', () => {
+  it('records application and API errors without retired endpoint-specific interpretation', () => {
     renderFeedback(<><ModuleButton module="catalog-form" error /><Inspector /></>);
     fireEvent.click(screen.getByRole('button', { name: 'catalog-form' }));
-    fireEvent.click(screen.getByRole('button', { name: 'B4' }));
+    fireEvent.click(screen.getByRole('button', { name: 'API' }));
 
     const records = JSON.parse(screen.getByTestId('records').textContent ?? '[]');
     expect(records).toHaveLength(2);
     expect(records[0]).toMatchObject({
-      code: 'resource-committed-refresh-failed',
+      code: 'request-failed',
       finalState: 'failed',
-      message: 'The change was submitted, but its latest status could not be confirmed. Refresh before trying again.',
+      message: 'Operation Failed (Request failed with status 503)',
     });
     expect(records[1]).toMatchObject({ finalState: 'failed', context: { form: 'catalog-form' } });
   });

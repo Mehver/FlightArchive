@@ -13,6 +13,13 @@ ROOT = Path(__file__).resolve().parents[3]
 APP = ROOT / "app"
 
 
+def _docker_stage_lines(dockerfile, stage):
+    lines = [line.strip() for line in dockerfile.splitlines() if line.strip()]
+    start = lines.index(next(line for line in lines if line.startswith("FROM ") and line.endswith(f" AS {stage}")))
+    end = next((index for index in range(start + 1, len(lines)) if lines[index].startswith("FROM ")), len(lines))
+    return lines[start:end]
+
+
 def test_container_configuration_lives_in_the_app_build_context():
     for name in ("Dockerfile", ".dockerignore", "compose.yaml", "compose.cache-host.yaml", ".env.example"):
         assert (APP / name).is_file()
@@ -23,15 +30,63 @@ def test_container_configuration_lives_in_the_app_build_context():
     assert "COPY backend/" in dockerfile
     assert "COPY app/" not in dockerfile
     assert "COPY backend/flightarchive ./flightarchive" in dockerfile
-    assert '"flightarchive.server:create_app"' in dockerfile
+    assert '["python", "-m", "flightarchive.container"]' in dockerfile
+    assert "/cache" not in dockerfile
+    assert not re.search(r"^USER\b", dockerfile, re.MULTILINE)
 
+    # Cache stays opt-in: base compose keeps exactly the two original mounts,
+    # unchanged, with the resource root still read-only.
     compose = (APP / "compose.yaml").read_text(encoding="utf-8")
     assert "context: ." in compose
     assert "dockerfile: Dockerfile" in compose
     assert "flightarchive:" in compose
     assert "container_name: flightarchive" in compose
-    assert "../data/resource" in compose
-    assert "../data/runtime" in compose
+    assert "${RFG_RESOURCE_HOST_PATH:-../data/resource}:/resource:ro" in compose
+    assert "${RFG_DATA_HOST_PATH:-../data/runtime}:/data" in compose
+    assert "cache" not in compose.lower()
+    assert "/cache" not in compose
+
+    # The optional override adds only /cache and never becomes the default.
+    override = (APP / "compose.cache-host.yaml").read_text(encoding="utf-8")
+    assert "${FLIGHTARCHIVE_CACHE_HOST_PATH" in override
+    assert "target: /cache" in override
+    assert "/resource" not in override and "/data" not in override
+
+    env = (APP / ".env.example").read_text(encoding="utf-8")
+    assert "RFG_RESOURCE_HOST_PATH" in env
+    assert "RFG_DATA_HOST_PATH" in env
+    assert "FLIGHTARCHIVE_CACHE_HOST_PATH=../cache" in env
+
+    # Version line 3 stays owned by the release script and in sync across docs.
+    versions = []
+    for readme in (ROOT / "README.md", ROOT / "docs" / "README-cn.md"):
+        match = re.search(r"<code>(v[0-9][^<]*)</code>", readme.read_text(encoding="utf-8").splitlines()[2])
+        assert match, readme
+        versions.append(match.group(1))
+    assert versions[0] == versions[1]
+
+
+def test_frontend_builder_receives_shared_test_fixtures_before_build():
+    dockerfile = (APP / "Dockerfile").read_text(encoding="utf-8")
+    builder = _docker_stage_lines(dockerfile, "frontend-builder")
+    runtime = _docker_stage_lines(dockerfile, "runtime")
+    fixture_copy = "COPY test-fixtures /src/app/test-fixtures"
+
+    assert fixture_copy in builder
+    assert builder.index(fixture_copy) < builder.index("RUN pnpm run build")
+    assert not any("test-fixtures" in line for line in runtime)
+    assert "COPY --from=frontend-builder /src/app/frontend/build ./frontend" in runtime
+
+    fixture_imports = []
+    for test_file in (APP / "frontend/src").rglob("*.test.ts*"):
+        source = test_file.read_text(encoding="utf-8")
+        for import_path in re.findall(r"from ['\"]([^'\"]*test-fixtures/[^'\"]+)['\"]", source):
+            imported_fixture = (test_file.parent / import_path).resolve()
+            assert imported_fixture.is_relative_to(APP / "test-fixtures")
+            assert imported_fixture.is_file()
+            fixture_imports.append(imported_fixture)
+
+    assert fixture_imports
 
 
 def test_public_app_branding_uses_flight_archive():

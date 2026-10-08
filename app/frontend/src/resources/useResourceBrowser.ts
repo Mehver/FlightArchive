@@ -2,19 +2,18 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, ApiError } from '../api/client';
-import type { ResourceReviewRow } from '../api/types';
 import type { MappingEntry } from '../rfg/api';
+import { useResourceMapping } from '../rfg/ResourceMappingProvider';
+import type { ResourceInventoryRow } from '../rfg/mapping';
 import type { TranslationKey } from '../i18n';
 import { toMappingRows } from './mappingRows';
 import { isPendingInbox } from './resourcePaths';
-import { useResourceReview } from './useResourceReview';
 
 export type ResourceBrowserView = 'thumbnails' | 'list';
 
 export interface ResourceBrowserItem {
   readonly entry: MappingEntry;
-  readonly review: ResourceReviewRow;
+  readonly resource: ResourceInventoryRow;
 }
 
 export type ResourceBrowserFilter = (item: ResourceBrowserItem) => boolean;
@@ -48,13 +47,12 @@ export function useResourceBrowser({
   order = inboxFirstResourceOrder,
   pageSize = RESOURCE_PICKER_PAGE_SIZE,
 }: UseResourceBrowserOptions) {
-  const review = useResourceReview();
+  const mapping = useResourceMapping();
   const [picked, setPicked] = useState<string[]>([...initialSelected]);
   const [query, setQueryState] = useState('');
   const [page, setPage] = useState(1);
   const [view, setView] = useState<ResourceBrowserView>('thumbnails');
   const [error, setError] = useState<TranslationKey | null>(null);
-  const [ignoring, setIgnoring] = useState(false);
   const session = useRef(0);
 
   useEffect(() => {
@@ -64,31 +62,25 @@ export function useResourceBrowser({
     setQueryState('');
     setError(null);
     setPage(1);
-    setIgnoring(false);
-    void review.load({ reconcile: true, clear: true })
-      .then((snapshot) => {
+    void mapping.refresh()
+      .then(() => {
         if (session.current !== current) return;
-        setPicked((selection) => selection.filter((path) => {
-          const row = snapshot.rows.find((candidate) => candidate.virtualPath === path);
-          return row !== undefined && !(row.state === 'pending' && !row.present);
-        }));
       })
       .catch(() => {
         if (session.current === current) setError('resourceLoadFailed');
       });
-    return () => review.cancel();
     // The initial selection is intentionally captured only when a session opens.
     // Parent rerenders must not discard in-progress browser state.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
-  const items = useMemo<ResourceBrowserItem[]>(() => toMappingRows(review.snapshot?.rows ?? []).flatMap((row) =>
-    row.entry ? [{ entry: row.entry, review: row.review }] : []), [review.snapshot]);
+  const items = useMemo<ResourceBrowserItem[]>(() => toMappingRows(mapping.inventory).flatMap((row) =>
+    row.entry ? [{ entry: row.entry, resource: row.resource }] : []), [mapping.inventory]);
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return items
-      .filter((item) => item.review.state !== 'ignored' && !(item.review.state === 'pending' && !item.review.present))
+      .filter((item) => item.resource.state !== 'ignored' && !(item.resource.state === 'pending' && !item.resource.present))
       .filter((item) => !filter || filter(item))
       .filter((item) => !needle || item.entry.virtual_path.toLowerCase().includes(needle))
       .sort(order);
@@ -115,33 +107,10 @@ export function useResourceBrowser({
       : previous.includes(path) ? [] : [path]);
   }, [multiple]);
 
-  const ignoredPath = picked[0];
-  const selectedItem = picked.length === 1 ? items.find((item) => item.entry.virtual_path === ignoredPath) : undefined;
-  const canIgnore = !multiple && selectedItem?.review.capabilities.ignore === true;
-  const ignore = useCallback(async () => {
-    if (!canIgnore || !ignoredPath) return;
-    const current = session.current;
-    setIgnoring(true);
-    setError(null);
-    try {
-      await api.ignoreResource({ ifMatch: review.revision, virtualPaths: [ignoredPath] });
-      if (session.current !== current) return;
-      await review.load();
-      if (session.current !== current) return;
-      setPicked([]);
-    } catch (problem) {
-      if (session.current === current) {
-        setError(problem instanceof ApiError && problem.httpStatus === 409 ? 'resourceIgnoreConflict' : 'resourceIgnoreFailed');
-      }
-    } finally {
-      if (session.current === current) setIgnoring(false);
-    }
-  }, [canIgnore, ignoredPath, review]);
-
   return {
-    picked, query, setQuery, page: currentPage, setPage, view, setView, error, ignoring,
-    items, visible, paged, pageCount, pageFrom, pageTo, toggle, canIgnore, ignore,
-    loading: review.snapshot === null,
+    picked, query, setQuery, page: currentPage, setPage, view, setView, error,
+    items, visible, paged, pageCount, pageFrom, pageTo, toggle,
+    loading: mapping.loading && mapping.mapping === null,
   };
 }
 

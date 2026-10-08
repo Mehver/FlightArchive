@@ -15,7 +15,7 @@
  *     labeled saved-layout or scan state because no electronic preview API exists.
  *   - Compact mode (compact={true})  → used in the preview card (FlightGridView):
  *     one composed layered stack — the paper back peeks behind the paper front
- *     (its true saved crop from the preview route when prepared, its raw scan
+ *     (its true browser-rendered saved crop when prepared, its raw scan
  *     thumbnail when explicitly unprepared, a plain backing sheet otherwise),
  *     and a bound electronic pass appears as a small offset corner card — so
  *     a partial or torn set of scans still reads as one deliberate ticket object.
@@ -25,9 +25,9 @@ import { useEffect, useState } from 'react';
 import { Box, Typography } from '@mui/material';
 import ConfirmationNumberOutlinedIcon from '@mui/icons-material/ConfirmationNumberOutlined';
 import QrCode2OutlinedIcon from '@mui/icons-material/QrCode2Outlined';
-import type { FlightRecord } from '../api/types';
-import { boardingPassPreviewUrl } from '../api/client';
-import { resourceDisplayUrl } from '../rfg/api';
+import type { FlightRecord, PaperBoardingPassLayout } from '../api/types';
+import { useBrowserImage } from '../resources/useBrowserImage';
+import { useNearViewport } from '../resources/useNearViewport';
 import { useTranslation, type TranslationKey } from '../i18n';
 import { BoardingPassFrame, DEFAULT_FRAME_ASPECT } from './BoardingPassFrame';
 import { BOARDING_PASS_SLOTS, slotLayout, slotResourcePath, slotState, type BoardingPassSlotKey } from './passPresentation';
@@ -49,29 +49,27 @@ function SlotIcon({ slot }: { slot: DisplaySlotKey }) {
 }
 
 /** Small backing sheet used by compact mode: the backing paper side's true
- *  saved crop (preview route, fitted whole with `contain`) when it is
+ *  browser-rendered saved crop (fitted whole with `contain`) when it is
  *  prepared, its raw scan thumbnail (`cover`) when it is explicitly
  *  unprepared, or a deliberately plain card when nothing is bound. A failed
  *  image degrades to the plain sheet — a prepared side never falls back to
  *  its raw scan — and the failure state resets whenever the source changes. */
 function BackingSheet({
-  flightId,
-  slot,
   resourcePath,
-  prepared,
+  crop,
   alt,
 }: {
-  flightId: string;
-  slot: BoardingPassSlotKey;
   resourcePath: string | null;
-  prepared: boolean;
+  crop?: PaperBoardingPassLayout['crop'];
   alt: string;
 }) {
-  const src = resourcePath === null ? null : prepared ? boardingPassPreviewUrl(flightId, slot) : resourceDisplayUrl(resourcePath);
-  const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [src]);
+  const visibility = useNearViewport<HTMLElement>();
+  const image = useBrowserImage(resourcePath, { crop, maxDimension: 1024, enabled: visibility.enabled });
+  const [elementFailed, setElementFailed] = useState(false);
+  useEffect(() => setElementFailed(false), [resourcePath, image.src]);
   return (
     <Box
+      ref={visibility.ref}
       aria-hidden
       sx={{
         position: 'absolute',
@@ -88,14 +86,14 @@ function BackingSheet({
         overflow: 'hidden',
       }}
     >
-      {src && !failed ? (
+      {image.status === 'ready' && !elementFailed ? (
         <Box
           component="img"
-          src={src}
+          src={image.src}
           alt={alt}
           loading="lazy"
-          onError={() => setFailed(true)}
-          sx={{ width: '100%', height: '100%', objectFit: prepared ? 'contain' : 'cover', display: 'block', opacity: 0.85 }}
+          onError={() => setElementFailed(true)}
+          sx={{ width: '100%', height: '100%', objectFit: crop ? 'contain' : 'cover', display: 'block', opacity: 0.85 }}
         />
       ) : null}
     </Box>
@@ -106,8 +104,13 @@ function BackingSheet({
  * so they deliberately show a status rather than issuing a request that cannot
  * succeed. An unprepared bound scan keeps its generic thumbnail. */
 function ElectronicMiniCard({ resourcePath, prepared, alt, savedLayoutLabel }: { resourcePath: string | null; prepared: boolean; alt: string; savedLayoutLabel: string }) {
+  const visibility = useNearViewport<HTMLElement>();
+  const image = useBrowserImage(prepared ? null : resourcePath, { enabled: visibility.enabled });
+  const [elementFailed, setElementFailed] = useState(false);
+  useEffect(() => setElementFailed(false), [resourcePath, image.src]);
   return (
     <Box
+      ref={visibility.ref}
       role="img"
       aria-label={alt}
       sx={{
@@ -138,16 +141,14 @@ function ElectronicMiniCard({ resourcePath, prepared, alt, savedLayoutLabel }: {
       ) : (
         <>
           <QrCode2OutlinedIcon sx={{ position: 'absolute', fontSize: 20 }} />
-          {resourcePath ? (
+          {image.status === 'ready' && !elementFailed ? (
             <Box
               component="img"
-              src={resourceDisplayUrl(resourcePath)}
+              src={image.src}
               alt={alt}
               loading="lazy"
+              onError={() => setElementFailed(true)}
               sx={{ position: 'relative', width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
-              onError={(e) => {
-                e.currentTarget.style.display = 'none';
-              }}
             />
           ) : null}
         </>
@@ -168,14 +169,14 @@ export function BoardingPassTrio({ flight, compact = false }: { flight: FlightRe
     const faceSlot: BoardingPassSlotKey = frontPath !== null || backPath === null ? 'paperBoardingPassFront' : 'paperBoardingPassBack';
     const backingSlot: BoardingPassSlotKey = faceSlot === 'paperBoardingPassFront' ? 'paperBoardingPassBack' : 'paperBoardingPassFront';
     const backingPath = slotResourcePath(flight, backingSlot);
-    const backingPrepared = slotState(backingPath, slotLayout(flight, backingSlot)) === 'prepared';
+    const backingLayout = slotLayout(flight, backingSlot);
+    const backingPrepared = slotState(backingPath, backingLayout) === 'prepared';
     const electronicPrepared = Boolean(flight.electronicBoardingPass?.extraction);
     return (
       <Box sx={{ position: 'relative', width: '100%', aspectRatio: String(DEFAULT_FRAME_ASPECT) }}>
-        <BackingSheet flightId={flight.id} slot={backingSlot} resourcePath={backingPath} prepared={backingPrepared} alt={t('boardingPassBack')} />
+        <BackingSheet resourcePath={backingPath} crop={backingPrepared ? backingLayout?.crop : undefined} alt={t('boardingPassBack')} />
         <BoardingPassFrame
           slot={faceSlot}
-          flightId={flight.id}
           resourcePath={slotResourcePath(flight, faceSlot)}
           layout={slotLayout(flight, faceSlot)}
           compact
@@ -201,7 +202,7 @@ export function BoardingPassTrio({ flight, compact = false }: { flight: FlightRe
             <SlotIcon slot={slot} />
             {t(SLOT_LABEL_KEY[slot])}
           </Typography>
-          <BoardingPassFrame slot={slot} flightId={flight.id} resourcePath={slotResourcePath(flight, slot)} layout={slotLayout(flight, slot)} />
+          <BoardingPassFrame slot={slot} resourcePath={slotResourcePath(flight, slot)} layout={slotLayout(flight, slot)} />
         </Box>
       ))}
       <Box sx={{ flex: '1 1 190px', minWidth: 170 }}>

@@ -130,21 +130,21 @@ export function FlightListView({ flights, airlineNames, airlines, onOpen, openLa
                 <Box data-testid="flight-list-paper-front-preview" sx={{ width: 58, flex: '0 0 auto' }}>
                   <BoardingPassFrame
                     slot="paperBoardingPassFront"
-                    flightId={flight.id}
                     resourcePath={slotResourcePath(flight, 'paperBoardingPassFront')}
                     layout={slotLayout(flight, 'paperBoardingPassFront')}
                     compact
                     layered={false}
+                    maxDimension={128}
                   />
                 </Box>
                 <Box data-testid="flight-list-paper-back-preview" sx={{ width: 58, flex: '0 0 auto', display: { xs: 'none', md: 'block' } }}>
                   <BoardingPassFrame
                     slot="paperBoardingPassBack"
-                    flightId={flight.id}
                     resourcePath={slotResourcePath(flight, 'paperBoardingPassBack')}
                     layout={slotLayout(flight, 'paperBoardingPassBack')}
                     compact
                     layered={false}
+                    maxDimension={128}
                   />
                 </Box>
               </Box>

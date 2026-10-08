@@ -1,75 +1,153 @@
 # Architecture map
 
+## Deployment shape
+
+FlightArchive is single-user software for one operator on a local machine or a trusted LAN. The React SPA and the Python host share one origin and one data directory. The browser is the domain authority and the backend is a small static/HTTP host. There is no authentication, no multi-user model, and no horizontal scaling.
+
+Two runtime directories are resolved by `app/backend/flightarchive/paths.py`:
+
+| Directory | Environment | Default | Rule |
+| --- | --- | --- | --- |
+| Resource root | `RFG_RESOURCE_PATH` | `/resource` | must already exist; exposed read-only |
+| Data root | `RFG_DATA_DIR` | `/data` | created if absent; writable |
+
+`resolve_runtime_paths` also accepts explicit values (used by the CLI and tests). Both paths must be real directories; the data stores reject symlinked roots.
+
 ## Runtime ownership and request routing
 
-`app/backend/flightarchive/server.py:create_app` builds the public FastAPI host.
+`app/backend/flightarchive/server.py:create_app` builds the public FastAPI host:
 
-- The host owns FlightArchive business endpoints at `/api/*` and derived images at `/images/*`; routers are in `routes/api.py` and `routes/images.py`.
-- It constructs the RFG application, explicitly enters RFG's lifespan (so its startup catalog scan runs), then mounts RFG at `/` **last**. RFG therefore supplies `/api/v1/*`, `/res/*`, and the final SPA/static fallback without shadowing business routes.
-- The child order is RFG explicit routes, a JSON 404 for unknown `/api/*`, then the SPA fallback. Do not add a host catch-all that changes this precedence.
-- RFG remains the resource catalog, mapping, hash, and original-byte delivery authority. FlightArchive talks to its documented HTTP endpoints only.
+- It constructs the RFG child application with `rfg.api.create_app(resource_root, data_root)` and enters RFG's lifespan from the host lifespan, so RFG's own startup scan runs.
+- Host state holds `archive_store` (`ArchiveStore`), `activity_log` (`ActivityLog`), `legacy_task_reader` (`LegacyTaskReader`), and `thumbnail_service` (`ThumbnailService`). There is no lifecycle service, scheduler, or domain cache manager.
+- The host router (`routes/api.py`, prefix `/api`) provides only `/api/healthz`, `/api/status`, the named-document archive routes, `/api/activity`, `/api/tasks`, and the domain-neutral `/api/thumbnails/{virtual_path:path}` relay.
+- `ApiError` and request-validation failures render `{"error": {code, message, details?}}` JSON.
+- A catch-all `/api/{path}` returning a JSON `not-found` error is registered on the RFG child **before** the SPA is mounted, so it covers unknown `/api/*` without shadowing RFG's `/api/v1/*` routes.
+- The built SPA (`FLIGHTARCHIVE_STATIC_DIR`, a discovered `frontend/build`, or `--static-dir`) is mounted on the RFG child at `/` as `SpaStaticFiles`, which falls back to `index.html`. RFG is mounted on the host at `/` last.
+- Effective precedence is: host `/api/*` routes → RFG `/api/v1/*` and `/res/*` → JSON 404 for unknown `/api/*` → SPA static/fallback.
 
-## Backend ownership
+`create_app` never seeds, migrates, or repairs data. It only reads what is already on disk. Startup initialization is a separate, explicitly invoked path.
+
+### Launch entry points
+
+| Entry point | Behavior |
+| --- | --- |
+| `python -m flightarchive` (`__main__.py`) | Local CLI. Calls `initialize_default_v2` (seed a missing v2 only; never reads v1), then serves with uvicorn. Default bind `127.0.0.1:8787`; `--host 0.0.0.0` exposes the app to the LAN and prints a warning because there is no auth layer. |
+| `python -m flightarchive.container` (`container.py`) | Container entrypoint. Calls `prepare_archive` (validate an existing v2, else one-way v1 migration with at most two attempts, else seed fallback), prints the `BootstrapOutcome`, then always launches HTTP on `0.0.0.0:8080`. Preparation failures never prevent startup; consumers inspect `archive_state`. |
+
+`app/Dockerfile` builds the SPA with Node, then installs only `backend/requirements.txt` (`fastapi`, `uvicorn`, `httpx`, `Pillow`, `remappable-file-gateway==1.0.0`) and runs `CMD ["python", "-m", "flightarchive.container"]`. `app/compose.yaml` mounts the resource directory read-only at `/resource` and the writable data directory at `/data`; the disposable thumbnail cache defaults to `/cache` inside the container. The optional `app/compose.cache-host.yaml` adds only a `/cache` bind mount for users who want to retain that disposable cache on the host.
+
+## Authority boundaries
 
 | Concern | Source of truth | Main code |
 | --- | --- | --- |
-| Flights and reference catalogs | `BusinessData` | `domain/models.py`, `domain/store.py`, `workspace/state.py` |
-| Business persistence / schema gate | `<RFG_DATA_DIR>/flightarchive/v1/business-data.json` | `business_data.py` |
-| RFG local-source catalog and virtual-path mapping | RFG data, including `<RFG_DATA_DIR>/rfg/mapping.json` | `routes/api.py:ResourceLifecycleService` |
-| Resource review projection (state, usage, and allowed actions) | joined RFG mapping/catalog plus `BusinessData` references; never persisted | `routes/api.py:resource_review_snapshot` |
-| Preview limits (restart-only) | `<RFG_DATA_DIR>/flightarchive/v1/preview-config.json` | `config.py` |
-| Disposable WebP thumbnail and rectangular-preview cache | `FLIGHTARCHIVE_CACHE_DIR` (default: sibling `cache/` of data root) | `thumbnails.py`, `routes/images.py` |
-| Deferred release retry candidates | process memory only | `routes/api.py:ResourceLifecycleService` |
-| Automatic fingerprint scheduling | process memory only (never replayed) | `tasks.py` |
-| Fingerprint task status/result history | `<RFG_DATA_DIR>/flightarchive/log/task/<UTC creation day>.jsonl` | `tasks.py` |
+| Business data shape, validation, and mutations | Frontend domain (browser memory, persisted as named JSON documents) | `domain/types.ts`, `domain/schemaV1.ts`, `domain/commands.ts`, `domain/archiveV2.ts`, `domain/BusinessDataProvider.tsx` |
+| Generic named-document storage | `<RFG_DATA_DIR>/flightarchive/v2/<document>` | `archive.py`, `routes/api.py`, `api/client.ts` |
+| Activity log | `<RFG_DATA_DIR>/flightarchive/log/activity/<UTC day>.jsonl` | `activity.py`, `routes/api.py`, `tasks/TasksPage.tsx` |
+| Legacy fingerprint task history (read-only) | `<RFG_DATA_DIR>/flightarchive/log/task/<UTC day>.jsonl` | `legacy_tasks.py`, `routes/api.py` |
+| Startup seed and one-way v1 migration | `.../flightarchive/v2`, `.../migrations`, `.../v1` (never modified) | `initialization.py`, `legacy_v1.py` |
+| Resource catalog, mappings, hashes, source bytes | RFG data and documented HTTP endpoints | `rfg/api.ts`, `rfg/mapping.ts`, `rfg/ResourceMappingProvider.tsx` |
+| Raster display relay and cache | RFG public HTTP endpoints, disposable local cache | `thumbnail.py`, `routes/api.py`, `resources/browserImageRenderer.ts`, `resources/useBrowserImage.ts` |
 
-`Workspace.transaction` holds the domain rollback boundary: a failed atomic BusinessData write restores the in-memory domain. Resource mapping cleanup is separate and best-effort only after a completed business mutation; see [`RESOURCE_LIFECYCLE.md`](RESOURCE_LIFECYCLE.md).
+The backend has no domain routes: there are no `/api/flights`, `/api/catalogs`, `/api/resources/*`, `/api/workspace/reset`, `/api/images/*`, or boarding-pass preview endpoints. Those responsibilities live in the frontend and in RFG. The one backend image facility is the domain-neutral, scale-only thumbnail relay below; it never performs a domain crop, looks up a flight, or owns a resource or mapping.
 
-For reviewed resource mapping mutations, a successful RFG mapping PUT is final. Response shaping reuses the preflight catalog; because the current RFG PUT response has no ETag, the host makes at most two post-commit mapping-read attempts. Exhaustion returns `503 resource-committed-refresh-failed` with `error.details.committed: true` and operation result fields: this reports an indeterminate refresh, not a rolled-back mutation.
+## Named JSON document store
 
-`tasks.py` is an explicit single-worker FIFO for automatic and manually requested fingerprints, not a durable job system. `POST /api/resources/fingerprints` validates and enqueues work, returning `202` plus its task snapshot; it never hashes inline. Scheduling state is lost on restart/shutdown and logged tasks are **not replayed**. Task IDs are lexically time-oriented (`task-<UTC YYYYMMDDTHHMMSSffffffZ>-<random hex>`). Every queued/running/progress/terminal state is an append-only full JSON snapshot, followed by a separate result record, under `<RFG_DATA_DIR>/flightarchive/log/task/`. A task always stays in its UTC creation-day file even when it crosses midnight.
+`archive.py` is a domain-neutral store for one registered application (`app_id = "flightarchive"`). It allowlists exactly six document ids:
 
-`GET /api/tasks` reads that log history, not the bounded in-memory scheduler view. With no parameters it returns the newest three dates for which a JSONL file exists. `before=YYYY-MM-DD` selects dates strictly before the cursor; `limitDays` is 1–30. The shape is `{days: [{date, tasks}], nextCursor, hasMore}`. On this read path, under a process-local lock, a latest `queued` or `running` status whose ID is not active in this process is atomically completed as `failed` with `task_interrupted`, followed by its result record. This repair is idempotent. A trailing crash-damaged partial line is ignored. The deployment contract is one backend process; files are not automatically removed.
+`manifest.json`, `flights.json`, `airlines.json`, `airports.json`, `aircraft-types.json`, `settings.json`.
 
-## UI and domain flow
+Rules:
 
-- React starts at `app/frontend/src/main.tsx`; routing/composition is in `App.tsx`. `api/client.ts` and `api/types.ts` are the browser API boundary.
-- `theme.ts` owns shared UI palette semantics. Its `productAccent` identity blue (`#64B3F4`) is fixed across light and dark modes for product-status/action accents; it does not replace semantic success, warning, or error colours. Accent IconButtons retain the standard IconButton resting and interaction surfaces, applying the product colour to their icon rather than a persistent tray.
-- Flight editing and display are in `flights/`; catalog/reference editing is in `reference/`; mapping, rematch, release, and fingerprints are in `resources/`. A shared file browser (`useResourceBrowser` + `ResourceBrowser`: search, thumbnail/list views, paging, classification, usage, empty/error states, configurable filtering and ordering) backs per-scenario shells. `ResourcePickerDialog` is the form shell used by flight/airline editors and by manual single-target rebinding (`selectable="inbox"`); by default it lists inbox pending files first, then already mapped/associated files, and hides the rest. `AutoRematchDialog` is the inbox-only multi-to-multi shell that combines candidate selection with matching-field rules. Resource Mappings keeps All browse-only; the Pending tab offers batch ignore only; the Missing tab offers batch auto-rematch and per-row manual rebind; Rebuild Mapping fixes the selected missing targets and lets the picker add or remove inbox candidates; the Paired tab offers per-row manual rebind beside fingerprinting.
-- Flight records retain their own airline, airport, aircraft-type, and optional registration values. Reference catalogs enrich those values rather than own them, so deleting a catalog entry never rewrites a flight.
-- Aircraft-type ICAO designators use their own 2–4 uppercase alphanumeric contract in both catalog and flight fields; this is separate from optional airline ICAO (3 letters) and airport ICAO (4 letters) catalog identifiers.
-- Aircraft types use one nullable `manufacturer` value. Suggested and custom manufacturer names are stored directly; `null` means none. The reference editor derives free-text autocomplete suggestions from current catalog values, not a server-side standard list.
-- `ReferenceLibraryPage` loads flights independently of catalogs to derive the per-row flight count and UI-only unlisted-code rows. Saving an unlisted row uses the ordinary catalog `PUT` upsert; until then it is neither selectable nor deletable and has no durable catalog record. If flight loading fails, the library remains usable but shows unavailable counts and derives no rows.
-- `PUT /api/catalogs/{kind}/{key}` is deliberately a merge upsert: the path key is authoritative, omitted fields retain existing values, and a missing key creates an entry from model defaults plus submitted fields. Both ordinary Add and unlisted-code registration use this route. All catalog deletion, including one item, uses `POST /api/catalogs/{kind}/delete` with `{keys, force?}` and is atomic.
-- The three resource-capable flight slots are `paperBoardingPassFront`, `paperBoardingPassBack`, and `electronicBoardingPass`; attachments and all three airline-logo slots may share the same mapped object path.
-- Airline catalog colors are grouped as `brandColors.primary` and `brandColors.contrast`. Its nullable `alliance` is the sole alliance value: `null` means no alliance, while standard and custom alliance names are stored directly. A flight's optional electronic boarding-pass color is `boardingPassColor`. The crop-centre sample is its default, while a user pixel pick or manual hex entry replaces it. Display reuses that one color for both flight gradient inputs, preserving the existing low-saturation rendering structure.
-- Scan/crop UI and worker protocol are in `scanstudio/`. The saved layout is image-free metadata with canonical center/size/rotation crop fields; legacy `corners` are ignored. Stage 1 edits only an in-bounds rotated rectangle; drawing corners are derived handles, not persisted geometry. The worker and preview endpoint each sample that rectangle upright without a perspective transform. The pointer magnifier is a separate source-pixel view and never affects crop geometry or editor zoom.
-- `thumbnails.py` directly maps each **paper** preview output pixel back to its oriented source coordinate. Do not replace that with whole-image rotation followed by crop: a valid off-centre rectangle can otherwise be clipped before it is sampled.
-- The browser worker creates the native `round(width)` by `round(height)` crop used by placement. The paper-preview endpoint samples the same geometry and then bounds only its disposable WebP to `maxDimension`; it must preserve aspect ratio rather than invent a second crop-size rule.
-- `GET /api/flights/{id}/boarding-passes/{slot}/preview` accepts only paper front/back slots. Electronic presentation metadata is persisted and edited in its studio, but the archive/detail UI has no electronic crop-preview endpoint and shows a saved-layout state instead of issuing that request.
+- Documents are opaque JSON. The store rejects non-finite numbers, non-UTF-8 input, and payloads over `MAX_DOCUMENT_BYTES` (16 MiB); it does not validate business shape.
+- Writes are atomic: a temp file in the same directory, flush + fsync, `os.replace`, then directory fsync. Deletes fsync the directory. Symlinked documents and symlinked path components are rejected.
+- `state()` reports `missing` (no valid v2 root), `ready` (all six documents readable), or `migration-failed` (a document is unreadable/invalid or the root is unsafe).
+- There is **no revision**, **no conditional/If-Match write**, **no multi-document transaction**, and **no lock**. Each document is saved independently; assembling a consistent aggregate is the frontend's responsibility. `create_app` never writes a missing document.
 
-## API entry points
+HTTP surface (`routes/api.py`, all responses `Cache-Control: no-store`):
 
-| Surface | Entry points |
+| Method and path | Result |
 | --- | --- |
-| Workspace | `GET /api/status`, `GET /api/healthz`, `POST /api/workspace/reset`, `GET /api/tasks` |
-| Flights | `GET/POST /api/flights`, `GET/PUT/DELETE /api/flights/{id}`, `GET /api/flights/{id}/boarding-passes/{slot}/preview` |
-| Reference catalogs | `GET /api/catalogs`, `PUT /api/catalogs/{kind}/{key}`, `POST /api/catalogs/{kind}/delete` |
-| Resources | `GET /api/resources/review`; `POST /api/resources/reconcile`, `/ignore`, `/unignore`, `/rematch`, `/release`, `/fingerprints`; `GET | HEAD /images/{virtual_path}` |
-| RFG passthrough/fallback | `/api/v1/*` and `/res/*` |
+| `GET /api/archive/{app_id}` | `{appId, documents}` (registered app only; unknown app → `404`) |
+| `GET /api/archive/{app_id}/documents` | `{documents}` |
+| `GET /api/archive/{app_id}/documents/{document_id}` | the stored JSON value (any finite JSON scalar/array/object) |
+| `PUT .../documents/{document_id}` | validate finite UTF-8 JSON and size, atomically replace, `204` |
+| `DELETE .../documents/{document_id}` | remove the document, `204` |
 
-Request/response validation and mutation sequencing live in `routes/api.py`; do not infer a public contract from a component alone. `GET /api/resources/review` is the backend-authoritative, read-only full join of RFG mapping/catalog and persisted flight/airline references. It returns the mapping ETag as `revision`, normalized rows, fingerprint presence, detailed uses, and server-computed capabilities; an unclaimed catalog file is a `local_only` row with `virtualPath: null`. `POST /api/resources/reconcile` performs discovery and stale-temporary cleanup, then returns exactly the same snapshot shape. The retired `/api/resources/sync` route is not retained. The resource picker and mappings page both consume this snapshot through `useResourceReview`; they no longer read raw RFG mapping, catalog, flights, and catalogs and join those four responses in the browser. The shared `ResourceBrowser` core reconciles once on each closed-to-open edge and renders backend `uses`/`capabilities`; shells only configure filtering, ordering, selection mode, and the action applied on confirm, while ordinary post-mutation refreshes use the read-only review endpoint.
+`GET /api/status` returns only domain-neutral status:
 
-`inbox/` and `ignore/` are the single temporary-mapping layer: resource reconciliation removes stale entries from either prefix, while missing stable object mappings remain available for rematching. Ignoring is an explicit mapping mutation: it can only rename a present `inbox/` entry to `ignore/<encoded local path>`; batch unignore can only restore selected present ignored entries to `inbox/<local path>` atomically. Ignored mappings are never stable objects, so they cannot be persisted in business data, released, fingerprinted, or used as rematch targets/candidates.
+```json
+{
+  "status": {
+    "persistence": {"mode": "named-json-documents", "writable": true, "persistenceError": null},
+    "archiveState": "missing | ready | migration-failed",
+    "activityRevision": "string | null"
+  }
+}
+```
 
-`GET /api/status` returns only `{status: {persistence, counts}}`; product name/version are not runtime status data. `GET /api/healthz` is the minimal container liveness probe and returns only `{ok: true}`. The sole in-repository product-version source is backend `flightarchive.__version__` for CLI/build metadata. Product and private frontend-package versions may change incompatibly, while persisted `flightarchive/v1` paths and `schemaVersion` payloads remain compatible within a product major version. RFG `/api/v1/*` is an upstream contract and is not a FlightArchive product-version declaration.
+`GET /api/healthz` returns `{ok: true}` only.
 
-Reviewed mapping commands carry `{ifMatch, ...}` and return compact operation results plus the new `revision`; they do not echo the raw RFG mapping or local catalog. `POST /api/resources/ignore` always accepts `virtualPaths` (including a one-element array). `POST /api/resources/rematch` is discriminated by `mode`: `explicit` accepts target/candidate pairs (a target may be a present or missing stable object, i.e. a manual force rebind), while `auto` accepts candidates, an optional target subset, and server-evaluated algorithms. Both rematch modes return `{applied, ambiguous, unmatched, revision}`. A rebind queues a full fingerprint run for each rebound target that remains business-referenced and stored no content hash (fingerprinting is scoped to business-referenced stable objects). The shared submit point is `ResourceLifecycleService.enqueue_fingerprint_work`; `enqueue_fingerprints` is the default-algorithm convenience wrapper.
+## Thumbnail relay and cache
 
-## Fast reconstruction path
+`thumbnail.py` is the only backend image facility. It is domain-neutral and reads source bytes exclusively through RFG's public HTTP endpoints (`/api/v1/meta/*` and `/res/*`); it never reads a source path or owns a resource or mapping.
 
-1. Read [`BUSINESS_DATA.md`](BUSINESS_DATA.md) for durable data and layout invariants.
-2. Read [`RESOURCE_LIFECYCLE.md`](RESOURCE_LIFECYCLE.md) before changing any resource relation, mapping, cache, or reconciliation behavior.
-3. Trace `server.py` -> `routes/api.py` -> `workspace/state.py` -> `domain/store.py` for a business mutation.
-4. Use `app/backend/tests/test_rfg_host.py` for host/mapping, ignore, rematch, and fingerprint contracts; use `test_thumbnails.py` for cache, rectangular preview, release, and failure cases.
-5. Use frontend tests adjacent to the affected feature, especially `reference/ReferenceLibraryPage.test.tsx` and `scanstudio/ScanStudioDialog.test.tsx`. Commands: from `app/backend`, run `pytest`; from `app/frontend`, run `pnpm test`, `pnpm typecheck`, or `pnpm build` as appropriate.
+`GET|HEAD /api/thumbnails/{virtual_path:path}?scale=<dyadic>` uses the same per-segment percent-decoding as `/res/` and accepts one optional decimal `scale` from `1, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625` (default `0.125`). Any other query parameter, a repeated `scale`, or an unsafe virtual path is `400`; there is no crop, flight lookup, or lifecycle concept.
+
+- `HEAD` reports runtime metadata without rendering or a full source `GET`: `X-Source-Width`/`Height` (EXIF-normalized), `X-Source-Bytes`, `X-Source-ETag`, `X-Thumbnail-Width`/`Height`/`Scale`, and a derivative `ETag`. Cold inspection fetches only a bounded source prefix through an RFG `Range` request (256 KiB). A cached entry's geometry is revalidated against that same bounded prefix, never by re-reading or re-rendering the source.
+- `GET` returns cached WebP bytes, or renders one on a cache miss. Rendering uses Pillow: JPEG decodes through the decoder's draft mode to bound cold work, while other formats may fully decode. A memory guard (Pillow decompression-bomb handling plus explicit dimension checks) and a one-job semaphore bound concurrency; these reduce risk but are not a hard memory guarantee.
+- Limits: source at most 256 MiB / 160,000,000 pixels / 65,535 px per dimension; output at most 4,000,000 pixels / 4096 px / 4 MiB. Out-of-range requests are `413`, unsupported formats `415`, unmapped sources `404`, and missing mapped sources or unavailable RFG surfaces `503`.
+- The cache is disposable and flat: paired `thumb-<key>.webp` and `thumb-<key>.json` regular files replaced atomically, capped at 256 MiB with oldest-first eviction. Symlinked or special-file roots and leaves are rejected rather than followed. The root defaults to `<data parent>/cache` (`/cache` in the container) and can be overridden with `FLIGHTARCHIVE_CACHE_DIR`. It never stores business data.
+- PNG EXIF orientation is recovered directly from the bounded 256 KiB header prefix by walking chunk lengths metadata-only, so no pixels are decoded; an `eXIf` chunk placed after `IDAT` is still read even though Pillow normally stops parsing a PNG at `IDAT`. When that chunk lies beyond the prefix the orientation is uninspectable and stays neutral, so the head geometry is only normalized when the orientation is actually visible. If the full decode later discovers an orientation that normalizes the dimensions differently, `GET` fails with `415 unsupported-header-orientation` and no cache entry is written, rather than silently emitting pixels that contradict the reported headers. Callers must therefore not assume every source's head geometry is normalized.
+
+## Activity and session feedback
+
+`ActivityLog` is a standalone append-only JSONL log usable without FastAPI. It writes one file per UTC day under `flightarchive/log/activity/`. `report` generates the record identity and time; callers cannot supply `id` or `createdAt`:
+
+- `id`: `activity-<UTC YYYYMMDDTHHMMSSffffffZ>-<random hex>`
+- `createdAt`: microsecond-precision UTC ISO timestamp
+
+`POST /api/activity` accepts exactly `{source, kind, severity, state, code, details}`. The five string fields are opaque labels; `details` must be finite JSON of at most 64 KiB, and the request body is capped at 128 KiB and rejected with `413` before it is read. In practice the frontend posts only important failures (not routine successes). `GET /api/activity` returns `{days: [{date, activities}], nextCursor, hasMore, revision}`; it defaults to the newest three existing dates and accepts `before=YYYY-MM-DD&limitDays=1..30`. `revision` is the newest valid record id; oversized, non-finite, or damaged lines are skipped without rewriting the file.
+
+The frontend heartbeat (`state/useWorkspaceHeartbeat.ts`) polls only `GET /api/status` every 30 seconds and exposes `checking | online | offline` plus the last status. `AppState` derives an unread badge from `activityRevision` versus the last revision the user acknowledged; opening the feedback drawer and loading activity advances that watermark. The drawer (`tasks/TasksPage.tsx`) shows three independent read-only streams: this session's feedback records, the persisted activity log, and the legacy fingerprint task history.
+
+## Legacy fingerprint task history
+
+`legacy_tasks.py` is a pure, read-only projection of the old task JSONL under `flightarchive/log/task/`. `GET /api/tasks` is its only HTTP surface: a paginated per-day read returning the latest record per task id. It never repairs, rewrites, resumes, or executes anything; stale `queued`/`running` records are displayed exactly as stored. There is no task scheduler, queue, or worker in the current backend.
+
+## Frontend structure
+
+- `main.tsx` composes `LanguageProvider` → `ResourceMappingProvider` → `App`; `AppStateProvider` adds feedback, business data, and heartbeat.
+- `domain/` owns `BusinessData`, schema v1 parse/normalize, pure mutation commands, the fixed v2 document split/aggregate, selectors, and `BusinessDataProvider` (the per-document save queue).
+- `rfg/` owns the RFG HTTP client, pure mapping transforms, and `ResourceMappingProvider`.
+- `resources/` owns the picker/browser, the mappings page, and the bounded browser image renderer.
+- `flights/`, `reference/`, `scanstudio/`, `boardingpass/` are the feature UI.
+- `state/`, `feedback/`, `tasks/` own status/heartbeat, the session feedback stream, and the history drawer.
+- `api/client.ts` is the host API boundary (`status`, archive documents, activity, tasks). There is no business-data, catalog, or resource API client because those are frontend/RFG concerns.
+
+## Command scripts and validation
+
+From `app/backend` (project virtualenv):
+
+- `python -m pytest tests -q` — backend suite.
+- `python -m pytest tests/test_rfg_host.py -q` — focused RFG host contract suite.
+
+From `app/frontend`:
+
+- `pnpm exec vitest run --maxWorkers=4` — frontend suite. On Node versions that expose an experimental global `localStorage` (which shadows jsdom's), run with `NODE_OPTIONS=--no-experimental-webstorage`.
+- `pnpm typecheck` — `tsc --noEmit`.
+- `pnpm build` — `tsc --noEmit && vite build` (output `build/`, served by the Python host).
+- `pnpm dev` — Vite dev server on 5173, proxying `/api` and `/res` to the CLI default `127.0.0.1:8787`.
+- `pnpm test:browser-images` — `node tests/browserImages.mjs`, a real-Chromium check of the bounded browser renderer with the relay itself **mocked** (small WebP derivatives plus original logical headers), so it verifies browser-side correctness, not live backend performance. Playwright is intentionally **not** a product dependency; the runner reads `PLAYWRIGHT_MODULE` (installed Playwright package directory or entry file, required), `CHROMIUM_PATH` (default `/usr/bin/chromium`), and `BROWSER_TEST_PORT` (default 41739) from the environment, starts a Vite dev server, and drives the page directly.
+- `pnpm test:thumbnail-relay` — `node tests/thumbnailRelay.mjs`, an optional live acceptance and performance harness for the thumbnail relay. It is deliberately environment-dependent: it requires a built SPA (`app/frontend/build`), the Python backend dependencies, `PLAYWRIGHT_MODULE`, and `CHROMIUM_PATH` (all required), and uses `PYTHON` to select the interpreter (default `app/backend/.venv/bin/python`). It generates every fixture in a private temporary directory, starts the real backend against that directory, seeds 92 flights, and drives the built SPA through Chromium; it never opens the configured resource or data roots. It reports cold/hot JPEG and PNG render times, viewport relay-request counts while browsing, and the number of original-resource requests (expected zero during ordinary browse), and asserts a populated disposable cache. Unlike `test:browser-images`, it exercises the actual Pillow/backend path, but because it depends on a local Chromium and built artifacts it is not part of the default or CI suites.
+
+Container helpers under `tools/`:
+
+- `BuildAll.bat` — builds the `app/` Docker context.
+- `BuildAndRunContainer.bat` — cleans build caches, rebuilds, and `docker run`s with `/resource:ro` and `/data`; it also offers an optional `/cache` bind mount for retaining the disposable thumbnail cache.
+- `ClearAllTemplateFiles.bat` — removes local build/test caches.
+
+The release workflow (`.github/workflows/docker-image.yml`) runs the backend suite, then frontend typecheck/suite/build, then publishes `linux/amd64` and `linux/arm64` images.
+
+## Explicitly out of scope
+
+No authentication, no multi-user or concurrency model, no sharding, no backend lifecycle/materialization/fingerprint services, no domain preview machinery or persistent preview cache, and no speculative expansion beyond the shipped single-user local/LAN feature set. The only backend image facility is the domain-neutral, scale-only thumbnail relay and its disposable cache.

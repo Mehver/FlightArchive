@@ -9,15 +9,18 @@
 
 ## 1 简介
 
-FlightArchive 是一个使用 Python、FastAPI、React 19、TypeScript 和 Material UI 构建的容器化飞行历史应用。它使用 [RemappableFileGateway](https://github.com/MehverLibs/remappable-file-gateway) （RFG）提供只读源文件发现、虚拟路径映射、资源交付与哈希功能。
+FlightArchive 是一个自托管、单用户的个人飞行档案，运行在本机或受信任的家庭 / 局域网环境中。它把你的飞行记录、登机牌扫描件和相关文件集中保存在一个由你掌控的私有位置，无需账号，也不依赖云端服务。
 
-它遵循以下规则：
+项目使用 Python、FastAPI、React 19、TypeScript 和 Material UI 编写，并以单个容器交付。你现有的媒体文件夹通过 [RemappableFileGateway](https://github.com/MehverLibs/remappable-file-gateway)（RFG）以只读方式接入，FlightArchive 只引用这些文件，而不会接管它们。
 
-- 航班、目录和登机牌布局数据由后端原子持久化
-- 资源从 RFG 资源根目录中选择，业务记录只保留已分类的虚拟路径
-- 可以检查资源映射并手动重新匹配，无需编辑虚拟路径
-- 缩略图是可丢弃的派生缓存数据，绝不进入业务数据
-- 指纹仅存储在直接绑定到已保存航班登机牌、附件或已保存航空公司徽标的已分类资源上
+### 功能
+
+- 以列表或卡片网格浏览飞行记录，并打开单个航班的详情。
+- 添加和编辑航班，并维护航空公司、机场和机型参考目录。
+- 裁切登机牌扫描件，并将纸质登机牌排布到模板上。
+- 将登机牌扫描件、航空公司标志及其他附件关联到资源文件夹中的文件。
+- 审阅资源映射、忽略不需要的文件，并在源文件缺失时重新连接已移动的文件。
+- 导入和导出业务数据，并在“活动与任务”抽屉中查看操作记录。
 
 <table>
     <tr>
@@ -32,37 +35,7 @@ FlightArchive 是一个使用 Python、FastAPI、React 19、TypeScript 和 Mater
     </tr>
 </table>
 
-### 1.1 资源模型
-
-RFG 拥有只读资源根目录和 `<data>/rfg/mapping.json`。FlightArchive 拥有 `<data>/flightarchive/v1/business-data.json`。独立的缓存根目录存放可重建的缩略图对象，永远不属于业务数据。
-
-### 1.2 预览配置
-
-首次启动时，FlightArchive 会原子地创建仅在重启后生效、可由用户编辑的配置文件 `<RFG_DATA_DIR>/flightarchive/v1/preview-config.json`。它独立于 BusinessData 和可丢弃的缩略图缓存。该文件必须是有效的版本 1 配置；无效配置会阻止启动，直至修正。修改仅在后端重启后生效。
-
-```json
-{
-  "schemaVersion": 1,
-  "thumbnails": {
-    "maxSourceBytes": 268435456,
-    "maxSourcePixels": 100000000,
-    "maxDimension": 512,
-    "quality": 82,
-    "jobConcurrency": 2
-  },
-  "rfg": {
-    "pillowImageMaxPixels": 100000000
-  }
-}
-```
-
-`thumbnails.maxSourceBytes` 默认值为 256 MiB。提高它、源像素上限或任务并发数会增加内存使用；并发图像工作也会产生相应的内存成本。修改缩略图设置会使缩略图缓存失效并重新生成配置标识。
-
-`rfg.pillowImageMaxPixels` 是唯一受支持的主机级 RFG 图像安全设置。它在 RFG 初始化前应用，并影响感知哈希。RFG ZIP 防护、哈希容量和内部阈值不能通过此文件配置。
-
-### 1.3 当前功能
-
-FlightArchive 提供响应式航班仪表盘、航班与航班参考目录（航空公司、机场、机型）编辑、资源选择与分类、包含忽略和重新匹配操作的映射审阅工作区、业务绑定资源的指纹功能，以及登机牌裁切和布局工具。
+各部分的实现契约见 [ARCHITECTURE.md](ARCHITECTURE.md)、[BUSINESS_DATA.md](BUSINESS_DATA.md) 和 [RESOURCE_LIFECYCLE.md](RESOURCE_LIFECYCLE.md)。
 
 ## 2 使用
 
@@ -83,8 +56,22 @@ docker run -d \
   -p 127.0.0.1:8080:8080/tcp \
   -v /path/for/resources:/resource:ro \
   -v /path/for/data:/data \
+  -v /path/for/cache:/cache \
    flightarchive:local
 ```
+
+容器启动后访问 http://localhost:8080。
+
+| 参数 | 作用 |
+| --- | --- |
+| `-p 127.0.0.1:8080:8080/tcp` | HTTP Web 界面 |
+| `-v /path/for/resources:/resource:ro` | 现有资源文件夹，以只读方式挂载 |
+| `-v /path/for/data:/data` | FlightArchive 数据与资源映射；保留此项即可保留你的档案 |
+| `-v /path/for/cache:/cache` | 可选的缩略图缓存，可安全删除并重建 |
+
+你的档案保存在 `/data` 中；`/resource` 为只读。可选的 `/cache` 挂载用于存放可重建的缩略图；未挂载时，缓存位于容器内部。
+
+> FlightArchive 不含身份验证，仅供单用户在本地或受信任的局域网中使用。请勿将其暴露到公网。
 
 **已发布镜像：** 每个已发布的 GitHub Release tag 会直接用作镜像 tag（不进行版本规范化），同时更新 `latest`：
 
@@ -95,17 +82,6 @@ docker pull docker.io/mehver/flightarchive:<release-tag>
 
 Release assets 还包含可分别加载的 `linux/amd64` 与 `linux/arm64` Docker 镜像 tarball。
 
-| 参数 | 作用 |
-| --- | --- |
-| `-p 127.0.0.1:8080:8080/tcp` | HTTP Web 界面 |
-| `-v /path/for/resources:/resource:ro` | 现有 RFG 资源根目录，只读 |
-| `-v /path/for/data:/data` | RFG 映射和 FlightArchive 业务数据 |
-| `-v /path/for/cache:/cache` | 可选的可重建缩略图缓存 |
-
-容器启动后访问 http://localhost:8080。未挂载可选缓存时，`/cache` 保持为普通的可丢弃容器目录。
-
-“活动与任务”抽屉会统一显示仅限本次会话的操作反馈，以及按日志日期分组的后台任务历史；活动记录不会跨页面重载持久化。任务历史仅在抽屉打开时加载，首次读取最近三个实际存在的日志日期，下滑时继续读取更早日期，并且只在存在活动任务时轮询最新页。
-
 ---
 
 **Docker Compose：**
@@ -115,75 +91,15 @@ cp app/.env.example app/.env
 docker compose --env-file app/.env -f app/compose.yaml up --build
 ```
 
-如需持久或高速的缩略图缓存，请设置 `FLIGHTARCHIVE_CACHE_HOST_PATH` 并运行：
+如需持久缩略图缓存，请在 `app/.env` 中取消注释 `FLIGHTARCHIVE_CACHE_HOST_PATH` 并加入可选覆盖配置，它只挂载 `/cache`：
 
 ```shell
 docker compose --env-file app/.env -f app/compose.yaml -f app/compose.cache-host.yaml up --build
 ```
 
-该覆盖配置只挂载 `/cache`；资源挂载保持只读，数据挂载保留 RFG 映射与业务状态。
-
 ## 3 开发
 
-**要求**
-
-- [Docker](https://www.docker.com/)
-- 用于前端开发的 [Node.js](https://nodejs.org/) v22 或更高版本
-- 用于后端开发和测试的 Python 3.10 或更高版本
-
-**安装依赖**
-
-```shell
-cd app/frontend
-pnpm install
-
-cd ../backend
-python -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements-dev.txt
-```
-
-**前端开发**
-
-```shell
-cd app/frontend
-pnpm dev
-```
-
-**编译前端**
-
-```shell
-cd app/frontend
-pnpm build
-```
-
-**后端服务**
-
-```shell
-cd app/backend
-RFG_RESOURCE_PATH=/path/for/resources \
-RFG_DATA_DIR=/path/for/data \
-python -m flightarchive
-```
-
-**测试 / 类型检查**
-
-```shell
-cd app/backend
-python -m pytest tests -q
-
-cd ../frontend
-pnpm exec vitest run --maxWorkers=4
-pnpm typecheck
-```
-
-**构建 Docker 镜像**
-
-```shell
-docker build -f app/Dockerfile -t flightarchive:local app
-```
-
-在 Windows 上，`tools/BuildAll.bat` 构建相同的本地镜像。 `tools/BuildAndRunContainer.bat` 是 Windows 辅助脚本，可清理本地构建产物、提示输入主机映射并启动后台容器。其他平台请使用[使用](#2-使用)章节中的 `docker run` 命令。
+开发环境搭建、本地运行命令与测试说明见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 
 ## 4 基于以下技术构建
 
@@ -199,8 +115,6 @@ docker build -f app/Dockerfile -t flightarchive:local app
     - [Material UI](https://github.com/mui/material-ui)
     - [Vitest](https://github.com/vitest-dev/vitest)
 - Docker
-  - `node:22-bookworm-slim`
-  - `python:3.14-slim`
 
 ## 5 许可证
 

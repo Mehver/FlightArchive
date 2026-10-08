@@ -5,9 +5,10 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
 import { LanguageProvider } from './i18n';
+import { ResourceMappingProvider } from './rfg/ResourceMappingProvider';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <LanguageProvider><App /></LanguageProvider>
+    <LanguageProvider><ResourceMappingProvider><App /></ResourceMappingProvider></LanguageProvider>
   </StrictMode>,
 );

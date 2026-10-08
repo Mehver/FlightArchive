@@ -40,8 +40,9 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import { api } from '../api/client';
+import { useBusinessData } from '../domain/BusinessDataProvider';
 import { resourceUrl } from '../rfg/api';
+import { assertDecodedLimits, loadBoundedSource } from '../resources/browserImageRenderer';
 import type { FlightRecord, PaperBoardingPassLayout } from '../api/types';
 import { useAppState } from '../state/AppState';
 import { useTranslation, type TranslationKey } from '../i18n';
@@ -131,6 +132,7 @@ export function PaperBoardingPassStudio({
   onSaved: (flight: FlightRecord) => void;
   onClose: () => void;
 }) {
+  const business = useBusinessData();
   const { t } = useTranslation();
   const { notify, showError } = useAppState();
   const dialogScale = useDialogScale();
@@ -224,10 +226,13 @@ export function PaperBoardingPassStudio({
     // rectangle restored — detection is never forced.
     setStage(existingLayout ? 'place' : 'crop');
     let cancelled = false;
+    const controller = new AbortController();
+    let sourceUrl: string | null = null;
     if (resourcePath) {
       const img = new Image();
       img.onload = () => {
         if (cancelled) return;
+        try { assertDecodedLimits(img.naturalWidth, img.naturalHeight); } catch { setImageError(true); return; }
         setImage(img);
         if (existingLayout) {
           const restoredQuad = rectToQuad(existingLayout.crop);
@@ -241,10 +246,18 @@ export function PaperBoardingPassStudio({
       img.onerror = () => {
         if (!cancelled) setImageError(true);
       };
-      img.src = resourceUrl(resourcePath);
+      void loadBoundedSource(resourceUrl(resourcePath), controller.signal).then((blob) => {
+        if (cancelled) return;
+        sourceUrl = URL.createObjectURL(blob);
+        img.src = sourceUrl;
+      }, (reason: unknown) => {
+        if (!cancelled && !(reason instanceof DOMException && reason.name === 'AbortError')) setImageError(true);
+      });
     }
     return () => {
       cancelled = true;
+      controller.abort();
+      if (sourceUrl) URL.revokeObjectURL(sourceUrl);
       if (generation === requestGenerationRef.current) {
         requestGenerationRef.current++;
         disposeWorker();
@@ -608,11 +621,13 @@ export function PaperBoardingPassStudio({
     if (!layout) return;
     setSaving(true);
     try {
-      const paperLayouts = { ...(flight.paperBoardingPassLayouts ?? {}) };
+      const currentFlight = business.data?.flights.find((item) => item.id === flight.id) ?? flight;
+      const paperLayouts = { ...(currentFlight.paperBoardingPassLayouts ?? {}) };
       paperLayouts[slot as 'paperBoardingPassFront' | 'paperBoardingPassBack'] = layout;
-      const result = await api.updateFlight(flight.id, { paperBoardingPassLayouts: paperLayouts });
+      const result = business.updateFlight(flight.id, { paperBoardingPassLayouts: paperLayouts });
+      await business.saveDocument('flights.json');
       notify(t('studioSaved'), 'success', { action: t('studioSave'), form: t('scanStudioTitle', { slot: t(SLOT_LABEL_KEY[slot]) }) });
-      onSaved(result.flight);
+      onSaved(result);
       onClose();
     } catch (error) {
       showError(error, t('studioSaveFailed'), { action: t('studioSave'), form: t('scanStudioTitle', { slot: t(SLOT_LABEL_KEY[slot]) }) });
@@ -624,11 +639,13 @@ export function PaperBoardingPassStudio({
   const clearLayout = async () => {
     setSaving(true);
     try {
-      const paperLayouts = { ...(flight.paperBoardingPassLayouts ?? {}) };
+      const currentFlight = business.data?.flights.find((item) => item.id === flight.id) ?? flight;
+      const paperLayouts = { ...(currentFlight.paperBoardingPassLayouts ?? {}) };
       delete paperLayouts[slot as 'paperBoardingPassFront' | 'paperBoardingPassBack'];
-      const result = await api.updateFlight(flight.id, { paperBoardingPassLayouts: paperLayouts });
+      const result = business.updateFlight(flight.id, { paperBoardingPassLayouts: paperLayouts });
+      await business.saveDocument('flights.json');
       notify(t('studioLayoutCleared'), 'success', { action: t('studioClearLayout'), form: t('scanStudioTitle', { slot: t(SLOT_LABEL_KEY[slot]) }) });
-      onSaved(result.flight);
+      onSaved(result);
       onClose();
     } catch (error) {
       showError(error, t('studioSaveFailed'), { action: t('studioClearLayout'), form: t('scanStudioTitle', { slot: t(SLOT_LABEL_KEY[slot]) }) });

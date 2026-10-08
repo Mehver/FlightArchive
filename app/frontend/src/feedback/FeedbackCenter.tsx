@@ -87,14 +87,6 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
 
   const showError = useCallback((error: unknown, fallback?: string, context?: FeedbackContext) => {
     const localizedFallback = fallback ?? t('operationFailed');
-    if (error instanceof ApiError && error.code === 'resource-committed-refresh-failed') {
-      return feedback({
-        message: t('resourceCommittedRefreshFailed'),
-        severity: 'error',
-        context,
-        code: error.code,
-      });
-    }
     if (error instanceof ApiError) {
       const message = error.code === 'network'
         ? t('apiNetworkUnavailable')

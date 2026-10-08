@@ -3,790 +3,898 @@
 
 from __future__ import annotations
 
-import asyncio
 import io
-import sqlite3
-import threading
-import time
+import json
 
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
 from flightarchive.server import create_app
-from flightarchive.thumbnails import DATABASE_PATH, DEFAULT_MAX_SOURCE_BYTES, Thumbnail
-from flightarchive.business_data import BusinessDataError
 
 
-def _image_bytes(fmt: str = "PNG", size: tuple[int, int] = (640, 480), color: tuple[int, int, int] = (200, 30, 30)) -> bytes:
-    buffer = io.BytesIO()
-    Image.new("RGB", size, color).save(buffer, fmt)
-    return buffer.getvalue()
+def _image_bytes(fmt="PNG", size=(80, 40), mode="RGB", **save_options):
+    output = io.BytesIO()
+    Image.new(mode, size, (40, 80, 120, 128) if mode == "RGBA" else (40, 80, 120)).save(
+        output, format=fmt, **save_options,
+    )
+    return output.getvalue()
 
 
-def app(tmp_path, files: dict[str, bytes], *, cache: bool = True):
-    root, data = tmp_path / "resources", tmp_path / "data"
-    root.mkdir(); data.mkdir()
-    for name, content in files.items():
-        (root / name).write_bytes(content)
-    cache_dir = (tmp_path / "cache") if cache else None
-    return create_app(resource_root=root, data_root=data, cache_dir=cache_dir), data, tmp_path / "cache"
+def _noisy_png_bytes(size=(1024, 768), level=90, **save_options):
+    """High-entropy PNG whose compressed IDAT exceeds the bounded header range."""
+    output = io.BytesIO()
+    noise = Image.effect_noise(size, level)
+    noise.save(output, "PNG", optimize=False, **save_options)
+    noise.close()
+    return output.getvalue()
 
 
-def _tasks(client):
-    return [task for day in client.get("/api/tasks").json()["days"] for task in day["tasks"]]
+def _move_png_exif_after_idat(payload):
+    """Move an existing PNG eXIf chunk immediately before IEND."""
+    import struct
 
+    assert payload[:8] == b"\x89PNG\r\n\x1a\n"
+    cursor = 8
+    chunks = []
+    while cursor < len(payload):
+        length = struct.unpack(">I", payload[cursor:cursor + 4])[0]
+        chunks.append(payload[cursor:cursor + 12 + length])
+        cursor += 12 + length
+    exif_chunk = next(chunk for chunk in chunks if chunk[4:8] == b"eXIf")
+    rest = [chunk for chunk in chunks if chunk[4:8] != b"eXIf"]
+    return b"\x89PNG\r\n\x1a\n" + b"".join(rest[:-1] + [exif_chunk, rest[-1]])
 
-def _bindings(db_path):
-    connection = sqlite3.connect(db_path)
-    try:
-        objects = connection.execute("SELECT count(*) FROM thumbnail_objects").fetchone()[0]
-        bindings = connection.execute("SELECT virtual_path, local_path, thumbnail_id FROM thumbnail_bindings").fetchall()
-        return objects, bindings
-    finally:
-        connection.close()
 
+def _png_with_exif_after_idat(size=(80, 40), orientation=6):
+    """A legitimate PNG that carries its eXIf chunk after IDAT.
 
-def test_cache_root_is_explicit_or_derived_as_data_sibling(tmp_path):
-    root, data = tmp_path / "resources", tmp_path / "data"
-    root.mkdir(); data.mkdir()
-    explicit = create_app(resource_root=root, data_root=data, cache_dir=tmp_path / "picked")
-    assert explicit.state.thumbnail_store.root == (tmp_path / "picked").resolve()
-    assert (tmp_path / "picked" / DATABASE_PATH).is_file()
-    derived = create_app(resource_root=root, data_root=data)
-    assert derived.state.thumbnail_store.root == (tmp_path / "cache").resolve()
-    assert derived.state.thumbnail_store.root != data.resolve()
-    assert (tmp_path / "cache" / DATABASE_PATH).is_file()
-    assert not (data / "flightarchive" / "v1" / "thumbnails").exists()
-
-
-def test_thumbnail_source_limit_defaults_to_256_mib_and_retains_pixel_guard(tmp_path):
-    application, _, _ = app(tmp_path, {})
-    store = application.state.thumbnail_store
-    assert store.max_source_bytes == 256 * 1024 * 1024 == DEFAULT_MAX_SOURCE_BYTES
-    assert store.max_source_pixels == 100_000_000
-
-
-def test_keyed_thumbnail_lock_survives_holder_exit_while_waiters_remain(tmp_path):
-    application, _, _ = app(tmp_path, {})
-    store = application.state.thumbnail_store
-    first_release = threading.Event()
-    second_entered = threading.Event()
-    second_release = threading.Event()
-    third_entered = threading.Event()
-
-    def first():
-        with store._path_lock("same.png"):
-            first_release.wait(timeout=2)
-
-    def second():
-        with store._path_lock("same.png"):
-            second_entered.set()
-            second_release.wait(timeout=2)
-
-    def third():
-        with store._path_lock("same.png"):
-            third_entered.set()
-
-    one = threading.Thread(target=first)
-    two = threading.Thread(target=second)
-    one.start()
-    deadline = time.monotonic() + 2
-    while "same.png" not in store._path_locks and time.monotonic() < deadline:
-        time.sleep(0.001)
-    original = store._path_locks["same.png"]
-    two.start()
-    deadline = time.monotonic() + 2
-    while original.users < 2 and time.monotonic() < deadline:
-        time.sleep(0.001)
-    assert original.users == 2
-
-    first_release.set()
-    assert second_entered.wait(timeout=2)
-    assert store._path_locks["same.png"] is original
-    three = threading.Thread(target=third)
-    three.start()
-    deadline = time.monotonic() + 2
-    while original.users < 2 and time.monotonic() < deadline:
-        time.sleep(0.001)
-    assert original.users == 2
-    assert not third_entered.is_set()
-
-    second_release.set()
-    one.join(timeout=2); two.join(timeout=2); three.join(timeout=2)
-    assert third_entered.is_set()
-    assert "same.png" not in store._path_locks
-
-
-def test_queued_thumbnail_miss_rechecks_cache_before_fetching_source(tmp_path, monkeypatch):
-    application, _, _ = app(tmp_path, {"ticket.png": _image_bytes()})
-    store = application.state.thumbnail_store
-    lifecycle = application.state.resource_lifecycle
-    cached: Thumbnail | None = None
-    state_lock = threading.Lock()
-    source_started = threading.Event()
-    release_source = threading.Event()
-    second_lookup = threading.Event()
-    source_fetches = 0
-    lookup_calls = 0
-    thumbnail = Thumbnail("cached", b"webp", 1, 1)
-    responses = []
-
-    def lookup(_virtual_path, _local_path, _source_etag):
-        nonlocal lookup_calls
-        with state_lock:
-            lookup_calls += 1
-            if lookup_calls >= 2:
-                second_lookup.set()
-            return cached
-
-    def get_or_create(_virtual_path, _local_path, _source_etag, _source):
-        nonlocal cached
-        with state_lock:
-            cached = thumbnail
-        return thumbnail
-
-    async def resource_bytes(_virtual_path, *, max_bytes):
-        nonlocal source_fetches
-        assert max_bytes == store.max_source_bytes
-        with state_lock:
-            source_fetches += 1
-        source_started.set()
-        await asyncio.to_thread(release_source.wait)
-        return b"source", '"source"'
-
-    monkeypatch.setattr(store, "lookup", lookup)
-    monkeypatch.setattr(store, "get_or_create", get_or_create)
-    monkeypatch.setattr(lifecycle, "resource_bytes", resource_bytes)
-
-    with TestClient(application) as client:
-        assert len(client.post("/api/resources/reconcile").json()["rows"]) == 1
-        def request_thumbnail():
-            responses.append(client.get("/images/inbox/ticket.png"))
-
-        first = threading.Thread(target=request_thumbnail)
-        first.start()
-        assert source_started.wait(timeout=2)
-        second = threading.Thread(target=request_thumbnail)
-        second.start()
-        assert second_lookup.wait(timeout=2)
-        release_source.set()
-        first.join(timeout=2)
-        second.join(timeout=2)
-
-    assert not first.is_alive()
-    assert not second.is_alive()
-    assert [response.status_code for response in responses] == [200, 200]
-    assert source_fetches == 1
-
-
-def test_thumbnail_is_generated_lazily_and_reused(tmp_path):
-    application, _, cache = app(tmp_path, {"ticket.png": _image_bytes()})
-    database = cache / DATABASE_PATH
-    with TestClient(application) as client:
-        assert len(client.post("/api/resources/reconcile").json()["rows"]) == 1
-        assert _bindings(database) == (0, [])
-        first = client.get("/images/inbox/ticket.png")
-        assert first.status_code == 200
-        assert first.headers["content-type"] == "image/webp"
-        assert first.headers["x-content-type-options"] == "nosniff"
-        thumbnail = Image.open(io.BytesIO(first.content))
-        assert thumbnail.format == "WEBP"
-        assert thumbnail.size == (512, 384)
-        objects, bindings = _bindings(database)
-        assert objects == 1
-        assert [row[:2] for row in bindings] == [("inbox/ticket.png", "ticket.png")]
-        second = client.get("/images/inbox/ticket.png")
-        assert second.status_code == 200 and second.headers["etag"] == first.headers["etag"]
-        not_modified = client.get(
-            "/images/inbox/ticket.png",
-            headers={"If-None-Match": f'"other", W/{first.headers["etag"]}'},
-        )
-        assert not_modified.status_code == 304
-        assert "content-length" not in not_modified.headers
-        assert client.get("/images/inbox/ticket.png", headers={"If-None-Match": "*"}).status_code == 304
-        head = client.head("/images/inbox/ticket.png")
-        assert head.status_code == 200 and head.headers["etag"] == first.headers["etag"]
-        # The cached object is reused; nothing is regenerated on repeat reads.
-        assert _bindings(database)[0] == 1
-
-
-def test_thumbnail_revalidates_an_in_place_source_replacement_before_304(tmp_path):
-    application, _, cache = app(tmp_path, {"ticket.png": _image_bytes(color=(200, 30, 30))})
-    source = tmp_path / "resources" / "ticket.png"
-    database = cache / DATABASE_PATH
-    with TestClient(application) as client:
-        assert len(client.post("/api/resources/reconcile").json()["rows"]) == 1
-        original = client.get("/images/inbox/ticket.png")
-        assert original.status_code == 200
-        # Do not synchronize manually. RFG rejects its stale scan, which the
-        # image route refreshes before using the cached thumbnail binding.
-        source.write_bytes(_image_bytes(color=(30, 30, 200)))
-        replacement = client.get("/images/inbox/ticket.png", headers={"If-None-Match": original.headers["etag"]})
-        assert replacement.status_code == 200
-        assert replacement.headers["etag"] != original.headers["etag"]
-        assert client.get("/images/inbox/ticket.png", headers={"If-None-Match": replacement.headers["etag"]}).status_code == 304
-        rfg_etag = client.head("/res/inbox/ticket.png").headers["etag"]
-
-    connection = sqlite3.connect(database)
-    try:
-        assert connection.execute(
-            "SELECT source_etag FROM thumbnail_bindings WHERE virtual_path = ?", ("inbox/ticket.png",)
-        ).fetchone() == (rfg_etag,)
-    finally:
-        connection.close()
-
-
-def test_large_jpeg_uses_decoder_draft_before_pixel_limit(tmp_path):
-    buffer = io.BytesIO()
-    Image.new("RGB", (4000, 3000), (20, 40, 60)).save(buffer, "JPEG")
-    application, _, _ = app(tmp_path, {"large.jpg": buffer.getvalue()})
-    application.state.thumbnail_store.max_source_pixels = 3_000_000
-    with TestClient(application) as client:
-        assert client.post("/api/resources/reconcile").status_code == 200
-        preview = client.get("/images/inbox/large.jpg")
-        assert preview.status_code == 200
-        assert Image.open(io.BytesIO(preview.content)).size[0] <= 512
-
-
-def test_paper_preview_rejects_an_oversized_jpeg_before_crop_sampling(tmp_path):
-    """Paper previews currently check full JPEG dimensions; unlike /images they do not draft."""
-    buffer = io.BytesIO()
-    Image.new("RGB", (4000, 3000), (20, 40, 60)).save(buffer, "JPEG")
-    application, _, _ = app(tmp_path, {"large.jpg": buffer.getvalue()})
-    application.state.thumbnail_store.max_source_pixels = 3_000_000
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        payload = _flight_payload("inbox/large.jpg")
-        payload["paperBoardingPassLayouts"] = {"paperBoardingPassFront": _layout(center_x=2000, center_y=1500, width=320, height=160)}
-        flight = client.post("/api/flights", json=payload).json()["flight"]
-
-        response = client.get(f"/api/flights/{flight['id']}/boarding-passes/paperBoardingPassFront/preview")
-
-    assert response.status_code == 422
-    assert response.json()["error"] == {
-        "code": "boarding-pass-preview-unavailable",
-        "message": "image exceeds the decoder pixel safety limit",
-    }
-
-
-def test_images_rejects_unmapped_non_decodable_and_non_raster(tmp_path):
-    files = {"note.txt": b"plain text", "vector.svg": b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>', "empty.png": b""}
-    application, _, cache = app(tmp_path, files)
-    with TestClient(application) as client:
-        assert len(client.post("/api/resources/reconcile").json()["rows"]) == 3
-        missing = client.get("/images/nowhere/missing.png")
-        assert missing.status_code == 404
-        assert missing.json()["error"]["code"] == "resource-not-found"
-        for path in ("inbox/note.txt", "inbox/vector.svg", "inbox/empty.png"):
-            rejected = client.get(f"/images/{path}")
-            assert rejected.status_code == 415
-            assert rejected.json()["error"]["code"] == "image-unsupported"
-        # Failed renders never leave bindings or objects behind.
-        assert _bindings(cache / DATABASE_PATH) == (0, [])
-        # The original delivery route is untouched by the image-only policy.
-        assert client.get("/res/inbox/note.txt").status_code == 200
-        assert client.get("/res/inbox/vector.svg").status_code == 200
-
-
-def test_classify_moves_thumbnail_binding_without_regeneration(tmp_path):
-    application, _, cache = app(tmp_path, {"ticket.png": _image_bytes()})
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        original = client.get("/images/inbox/ticket.png")
-        assert original.status_code == 200
-        classified = client.post(
-            "/api/flights",
-            json={
-                "flightNumber": "1",
-                "airlineCode": "CA",
-                "departureAirport": "PEK",
-                "arrivalAirport": "SHA",
-                "departureDate": "2026-01-01",
-                "paperBoardingPassFrontResourcePath": "inbox/ticket.png",
-            },
-        )
-        assert classified.status_code == 201
-        target = classified.json()["flight"]["paperBoardingPassFrontResourcePath"]
-        moved = client.get(f"/images/{target}")
-        assert moved.status_code == 200
-        assert moved.headers["etag"] == original.headers["etag"]
-        assert client.get("/images/inbox/ticket.png").status_code == 404
-        objects, bindings = _bindings(cache / DATABASE_PATH)
-        assert objects == 1
-        assert [row[:2] for row in bindings] == [(target, "ticket.png")]
-
-
-def test_flight_submission_background_task_persists_every_image_fingerprint(tmp_path):
-    application, _, _ = app(tmp_path, {"ticket.png": _image_bytes()})
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        created = client.post(
-            "/api/flights",
-            json={
-                "flightNumber": "1",
-                "airlineCode": "CA",
-                "departureAirport": "PEK",
-                "arrivalAirport": "SHA",
-                "departureDate": "2026-01-01",
-                "paperBoardingPassFrontResourcePath": "inbox/ticket.png",
-            },
-        )
-        assert created.status_code == 201
-        path = created.json()["flight"]["paperBoardingPassFrontResourcePath"]
-        deadline = time.monotonic() + 5
-        task = None
-        while time.monotonic() < deadline:
-            task = _tasks(client)[0]
-            if task["state"] in {"succeeded", "failed"}:
-                break
-            time.sleep(0.01)
-        assert task is not None and task["state"] == "succeeded"
-        assert all(item["state"] == "succeeded" for item in task["items"])
-        entry = next(item for item in client.get("/api/v1/meta/map").json()["entries"] if item["virtual_path"] == path)
-        assert all(entry[algorithm] for algorithm in ("crc32", "md5", "sha256", "ahash", "dhash", "phash"))
-
-
-def test_lookup_invalidates_binding_when_mapping_changes_externally(tmp_path):
-    files = {"first.png": _image_bytes(color=(200, 30, 30)), "second.png": _image_bytes(color=(30, 30, 200))}
-    application, _, cache = app(tmp_path, files)
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        first = client.get("/images/inbox/first.png")
-        assert first.status_code == 200
-        # An external actor retargets the virtual path to another local file.
-        mapping = client.get("/api/v1/meta/map")
-        document = mapping.json()
-        entry = next(item for item in document["entries"] if item["virtual_path"] == "inbox/first.png")
-        entry["local_path"] = "second.png"
-        document["entries"] = [item for item in document["entries"] if item["virtual_path"] != "inbox/second.png"]
-        assert client.put("/api/v1/meta/map", json=document, headers={"If-Match": mapping.headers["etag"]}).status_code == 200
-        regenerated = client.get("/images/inbox/first.png")
-        assert regenerated.status_code == 200
-        assert regenerated.headers["etag"] != first.headers["etag"]
-        objects, bindings = _bindings(cache / DATABASE_PATH)
-        assert [row[:2] for row in bindings] == [("inbox/first.png", "second.png")]
-        # The orphaned first object was garbage-collected after regeneration.
-        assert objects == 1
-
-
-def test_rematch_replaces_stale_target_with_candidate_thumbnail(tmp_path):
-    files = {"ticket.png": _image_bytes(color=(200, 30, 30)), "replacement.png": _image_bytes(color=(30, 200, 30))}
-    application, _, cache = app(tmp_path, files)
-    root = tmp_path / "resources"
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        mapping = client.get("/api/v1/meta/map")
-        document = mapping.json()
-        ticket = next(item for item in document["entries"] if item["local_path"] == "ticket.png")
-        document["entries"] = [item for item in document["entries"] if item is not ticket]
-        document["entries"].append({"virtual_path": "old/missing.png", "local_path": "ticket.png"})
-        assert client.put("/api/v1/meta/map", json=document, headers={"If-Match": mapping.headers["etag"]}).status_code == 200
-        stale = client.get("/images/old/missing.png")
-        assert stale.status_code == 200
-        candidate_etag = client.get("/images/inbox/replacement.png").headers["etag"]
-        assert candidate_etag != stale.headers["etag"]
-        # The target file disappears and the candidate replaces it.
-        (root / "ticket.png").unlink()
-        client.post("/api/resources/reconcile")
-        etag = client.get("/api/v1/meta/map").headers["etag"]
-        response = client.post("/api/resources/rematch", json={"ifMatch": etag, "mode": "explicit", "matches": [{"targetVirtualPath": "old/missing.png", "candidateInboxVirtualPath": "inbox/replacement.png"}]})
-        assert response.status_code == 200
-        rebound = client.get("/images/old/missing.png")
-        assert rebound.status_code == 200
-        assert rebound.headers["etag"] == candidate_etag
-        objects, bindings = _bindings(cache / DATABASE_PATH)
-        assert [row[:2] for row in bindings] == [("old/missing.png", "replacement.png")]
-        # The stale target object was eliminated; only the candidate's remains.
-        assert objects == 1
-
-
-def _flight_payload(path: str | None = None, *, number: str = "1"):
-    payload = {
-        "flightNumber": number,
-        "airlineCode": "CA",
-        "departureAirport": "PEK",
-        "arrivalAirport": "SHA",
-        "departureDate": "2026-01-01",
-    }
-    if path is not None:
-        payload["paperBoardingPassFrontResourcePath"] = path
-    return payload
-
-
-def _layout(corners=None, *, center_x=320, center_y=240, width=320, height=160, rotation=0):
-    return {
-        "schemaVersion": 1, "algorithm": "canny", "templateId": "default.svg",
-        "crop": {"centerX": center_x, "centerY": center_y, "width": width, "height": height, "rotationDegrees": rotation,
-                 **({"corners": [{"x": x, "y": y} for x, y in corners]} if corners is not None else {})},
-        "placement": {"scale": 1, "rotationDegrees": 0, "offsetX": 0, "offsetY": 0},
-    }
-
-
-def test_deleting_last_flight_releases_mapping_and_rebinds_thumbnail_to_inbox(tmp_path):
-    application, _, cache = app(tmp_path, {"ticket.png": _image_bytes()})
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        client.get("/images/inbox/ticket.png")
-        created = client.post("/api/flights", json=_flight_payload("inbox/ticket.png"))
-        assert created.status_code == 201
-        path = created.json()["flight"]["paperBoardingPassFrontResourcePath"]
-        assert client.delete(f"/api/flights/{created.json()['flight']['id']}").status_code == 200
-        assert not any(item["virtual_path"] == path for item in client.get("/api/v1/meta/map").json()["entries"])
-    assert _bindings(cache / DATABASE_PATH)[1][0][:2] == ("inbox/ticket.png", "ticket.png")
-
-
-def test_shared_flight_and_airline_references_retain_mapping(tmp_path):
-    application, _, cache = app(tmp_path, {"ticket.png": _image_bytes()})
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        client.get("/images/inbox/ticket.png")
-        first = client.post("/api/flights", json=_flight_payload("inbox/ticket.png")).json()["flight"]
-        path = first["paperBoardingPassFrontResourcePath"]
-        second = client.post("/api/flights", json=_flight_payload(path, number="2")).json()["flight"]
-        airline = client.put("/api/catalogs/airlines/CA", json={"nameEn": "Air China", "horizontalLogoResourcePath": path})
-        assert airline.status_code == 200
-        assert client.delete(f"/api/flights/{first['id']}").status_code == 200
-        assert client.delete(f"/api/flights/{second['id']}").status_code == 200
-        assert any(item["virtual_path"] == path for item in client.get("/api/v1/meta/map").json()["entries"])
-        assert _bindings(cache / DATABASE_PATH)[1][0][:2] == (path, "ticket.png")
-        assert client.post("/api/catalogs/airlines/delete", json={"keys": ["CA"]}).status_code == 200
-        assert not any(item["virtual_path"] == path for item in client.get("/api/v1/meta/map").json()["entries"])
-    assert _bindings(cache / DATABASE_PATH)[1][0][:2] == ("inbox/ticket.png", "ticket.png")
-
-
-def test_reconcile_drops_thumbnail_and_temporary_mapping_for_disappeared_inbox_source(tmp_path):
-    application, _, cache = app(tmp_path, {"ticket.png": _image_bytes()})
-    source = tmp_path / "resources" / "ticket.png"
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        assert client.get("/images/inbox/ticket.png").status_code == 200
-        source.unlink()
-        assert client.post("/api/resources/reconcile").status_code == 200
-        assert not any(item["virtual_path"] == "inbox/ticket.png" for item in client.get("/api/v1/meta/map").json()["entries"])
-    assert _bindings(cache / DATABASE_PATH) == (0, [])
-
-
-def test_boarding_pass_preview_is_rotated_rectangular_crop_cached_and_cleaned(tmp_path):
-    source = Image.new("RGB", (640, 480), "black")
-        # The selected rectangle contains this red document; its surrounding pixels are
-    # blue, proving the endpoint is not returning the source thumbnail.
-    for x in range(140, 500):
-        for y in range(140, 340):
-            source.putpixel((x, y), (220, 20, 20))
-    buffer = io.BytesIO(); source.save(buffer, "PNG")
-    application, _, cache = app(tmp_path, {"ticket.png": buffer.getvalue()})
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        payload = _flight_payload("inbox/ticket.png")
-        payload["paperBoardingPassLayouts"] = {"paperBoardingPassFront": _layout([(140, 140), (500, 140), (500, 340), (140, 340)])}
-        created = client.post("/api/flights", json=payload)
-        assert created.status_code == 201
-        flight = created.json()["flight"]
-        url = f"/api/flights/{flight['id']}/boarding-passes/paperBoardingPassFront/preview"
-        first = client.get(url)
-        assert first.status_code == 200 and first.headers["content-type"] == "image/webp"
-        rendered = Image.open(io.BytesIO(first.content))
-        assert rendered.size == (320, 160)
-        assert rendered.convert("RGB").getpixel((180, 100))[0] > 150
-        not_modified = client.get(url, headers={"If-None-Match": f'W/{first.headers["etag"]}, "other"'})
-        assert not_modified.status_code == 304
-        assert "content-length" not in not_modified.headers
-        assert client.get(url, headers={"If-None-Match": "*"}).status_code == 304
-        # A layout mutation discards the old flight-specific derivative.
-        updated = client.put(f"/api/flights/{flight['id']}", json={"paperBoardingPassLayouts": {
-            "paperBoardingPassFront": _layout(width=300, height=140)
-        }})
-        assert updated.status_code == 200
-        second = client.get(url)
-        assert second.status_code == 200 and second.headers["etag"] != first.headers["etag"]
-        assert client.delete(f"/api/flights/{flight['id']}").status_code == 200
-    assert _bindings(cache / DATABASE_PATH) == (0, [])
-
-
-def test_boarding_pass_preview_requires_a_saved_crop(tmp_path):
-    application, _, _ = app(tmp_path, {"ticket.png": _image_bytes()})
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        flight = client.post("/api/flights", json=_flight_payload("inbox/ticket.png")).json()["flight"]
-        response = client.get(f"/api/flights/{flight['id']}/boarding-passes/paperBoardingPassFront/preview")
-        assert response.status_code == 422
-        assert response.json()["error"]["code"] == "boarding-pass-preview-unavailable"
-
-
-def test_boarding_pass_preview_keeps_rotated_rectangle_pixel_orientation(tmp_path):
-    """A +90° rectangle is clockwise in Canvas/rectToQuad coordinates.
-
-    Four coloured source quadrants make a sign inversion visibly detectable:
-    the returned upright crop must retain TL/TR/BL/BR order, rather than merely
-    contain the selected central colour.
+    The bounded prefix stops at IDAT, so a metadata-only inspection can never
+    see this orientation without decoding the whole image.
     """
-    source = Image.new("RGB", (640, 480), "black")
-    colors = ((230, 20, 20), (20, 220, 20), (20, 20, 230), (220, 220, 20))
-    center_x, center_y, crop_width, crop_height = 320, 240, 200, 100
-    # Source coordinates for a +90° rectToQuad rectangle: (x, y) -> (-y, x).
-    for local_x in range(-crop_width // 2, crop_width // 2):
-        for local_y in range(-crop_height // 2, crop_height // 2):
-            quadrant = (local_y >= 0) * 2 + (local_x >= 0)
-            source.putpixel((center_x - local_y, center_y + local_x), colors[quadrant])
-    buffer = io.BytesIO(); source.save(buffer, "PNG")
-    application, _, _ = app(tmp_path, {"ticket.png": buffer.getvalue()})
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        payload = _flight_payload("inbox/ticket.png")
-        payload["paperBoardingPassLayouts"] = {
-            "paperBoardingPassFront": _layout(center_x=center_x, center_y=center_y, width=crop_width, height=crop_height, rotation=90)
-        }
-        flight = client.post("/api/flights", json=payload).json()["flight"]
-        response = client.get(f"/api/flights/{flight['id']}/boarding-passes/paperBoardingPassFront/preview")
+    exif = Image.Exif()
+    exif[274] = orientation
+    output = io.BytesIO()
+    image = Image.new("RGB", size, "blue")
+    image.paste("red", (0, 0, size[0] // 2, size[1]))
+    image.save(output, "PNG", exif=exif)
+
+    return _move_png_exif_after_idat(output.getvalue())
+
+
+def _client(tmp_path, sources, mapping, *, cache=None):
+    resources = tmp_path / "resources"
+    runtime = tmp_path / "runtime"
+    resources.mkdir(exist_ok=True)
+    runtime.mkdir(exist_ok=True)
+    for name, payload in sources.items():
+        path = resources / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    app = create_app(
+        resource_root=resources,
+        data_root=runtime,
+        cache_dir=cache if cache is not None else tmp_path / "cache",
+    )
+    client = TestClient(app)
+    client.__enter__()
+    response = client.put("/api/v1/meta/map", json={"entries": mapping})
+    assert response.status_code == 200
+    return app, client
+
+
+def _close(client):
+    client.__exit__(None, None, None)
+
+
+def test_thumbnail_nested_encoded_path_headers_and_original_range(tmp_path):
+    virtual = "nested/航 班/100%#scan.png"
+    payload = _image_bytes(size=(80, 40))
+    _, client = _client(tmp_path, {"source.png": payload}, [{
+        "virtual_path": virtual, "local_path": "source.png",
+    }])
+    try:
+        url = "/api/thumbnails/nested/%E8%88%AA%20%E7%8F%AD/100%25%23scan.png?scale=0.125"
+        head = client.head(url)
+        assert head.status_code == 200
+        assert head.headers["x-source-width"] == "80"
+        assert head.headers["x-source-height"] == "40"
+        assert head.headers["x-source-bytes"] == str(len(payload))
+        assert head.headers["x-thumbnail-width"] == "10"
+        assert head.headers["x-thumbnail-height"] == "5"
+        assert head.headers["x-thumbnail-scale"] == "0.125"
+        assert head.headers["cache-control"] == "no-cache"
+        assert "content-length" not in head.headers
+
+        result = client.get(url)
+        assert result.status_code == 200 and result.headers["content-type"] == "image/webp"
+        assert result.headers["x-source-etag"] == head.headers["x-source-etag"]
+        with Image.open(io.BytesIO(result.content)) as rendered:
+            assert rendered.size == (10, 5)
+
+        original = client.get(
+            "/res/nested/%E8%88%AA%20%E7%8F%AD/100%25%23scan.png",
+            headers={"Range": "bytes=0-7"},
+        )
+        assert original.status_code == 206
+        assert original.content == payload[:8]
+        assert original.headers["content-range"].startswith("bytes 0-7/")
+    finally:
+        _close(client)
+
+
+def test_thumbnail_head_content_type_matches_get_cold_and_warm(tmp_path, monkeypatch):
+    payload = _image_bytes(size=(80, 40))
+    app, client = _client(tmp_path, {"x.png": payload}, [{
+        "virtual_path": "x.png", "local_path": "x.png",
+    }])
+    service = app.state.thumbnail_service
+    url = "/api/thumbnails/x.png?scale=0.5"
+
+    def forbidden(action):
+        def call(*_args, **_kwargs):
+            raise AssertionError(f"HEAD must not {action}")
+        return call
+
+    try:
+        monkeypatch.setattr(service, "_source_get", forbidden("fetch the full source"))
+        monkeypatch.setattr(service, "_render", forbidden("render"))
+        cold = client.head(url)
+        assert cold.status_code == 200
+        assert cold.headers["content-type"] == "image/webp"
+        assert "content-length" not in cold.headers
+        monkeypatch.undo()
+
+        rendered = client.get(url)
+        assert rendered.status_code == 200
+        assert rendered.headers["content-type"] == "image/webp"
+
+        monkeypatch.setattr(service, "_source_get", forbidden("fetch the full source"))
+        monkeypatch.setattr(service, "_render", forbidden("render"))
+        warm = client.head(url)
+        assert warm.status_code == 200
+        assert warm.headers["content-type"] == "image/webp"
+        assert warm.headers["content-length"] == rendered.headers["content-length"]
+    finally:
+        _close(client)
+
+
+@pytest.mark.parametrize("scale", ["nan", "inf", "0", "0.2", "2", "1/8", ""])
+def test_thumbnail_rejects_invalid_scale(tmp_path, scale):
+    _, client = _client(tmp_path, {"x.png": _image_bytes()}, [{
+        "virtual_path": "x.png", "local_path": "x.png",
+    }])
+    try:
+        assert client.get(f"/api/thumbnails/x.png?scale={scale}").status_code == 400
+    finally:
+        _close(client)
+
+
+@pytest.mark.parametrize("query", ["crop=x", "rotationDegrees=90", "scale=0.5&scale=0.25"])
+def test_thumbnail_rejects_non_scale_or_repeated_parameters(tmp_path, query):
+    _, client = _client(tmp_path, {"x.png": _image_bytes()}, [{
+        "virtual_path": "x.png", "local_path": "x.png",
+    }])
+    try:
+        assert client.get(f"/api/thumbnails/x.png?{query}").status_code == 400
+    finally:
+        _close(client)
+
+
+@pytest.mark.parametrize("path", ["%2E%2E%2Fx.png", ".%2Fx.png", "a%5Cb.png", "a//b.png"])
+def test_thumbnail_rejects_unsafe_virtual_path(tmp_path, path):
+    _, client = _client(tmp_path, {"x.png": _image_bytes()}, [])
+    try:
+        assert client.get(f"/api/thumbnails/{path}").status_code == 400
+    finally:
+        _close(client)
+
+
+def test_thumbnail_magic_validation_and_unmapped_or_missing_status(tmp_path):
+    _, client = _client(tmp_path, {"poison.png": b"<svg></svg>"}, [
+        {"virtual_path": "poison.png", "local_path": "poison.png"},
+        {"virtual_path": "gone.png", "local_path": "gone.png"},
+    ])
+    try:
+        assert client.get("/api/thumbnails/poison.png").status_code == 415
+        assert client.get("/api/thumbnails/not-mapped.png").status_code == 404
+        assert client.get("/api/thumbnails/gone.png").status_code == 503
+    finally:
+        _close(client)
+
+
+@pytest.mark.parametrize("payload", [b"plain text", b"%PDF-1.7\n", b"<svg xmlns='http://www.w3.org/2000/svg'/>"])
+def test_thumbnail_rejects_non_raster_payloads(tmp_path, payload):
+    _, client = _client(tmp_path, {"poison.bin": payload}, [{
+        "virtual_path": "looks-like.png", "local_path": "poison.bin",
+    }])
+    try:
+        assert client.head("/api/thumbnails/looks-like.png").status_code == 415
+    finally:
+        _close(client)
+
+
+def test_thumbnail_exif_orientation_alpha_and_first_gif_frame(tmp_path):
+    jpeg = io.BytesIO()
+    exif = Image.Exif()
+    exif[274] = 6
+    Image.new("RGB", (40, 20), "red").save(jpeg, "JPEG", exif=exif)
+    gif = io.BytesIO()
+    Image.new("RGB", (30, 20), "red").save(
+        gif, "GIF", save_all=True, append_images=[Image.new("RGB", (30, 20), "blue")], duration=10,
+    )
+    sources = {"oriented.jpg": jpeg.getvalue(), "alpha.png": _image_bytes(mode="RGBA"), "anim.gif": gif.getvalue()}
+    mapping = [{"virtual_path": name, "local_path": name} for name in sources]
+    _, client = _client(tmp_path, sources, mapping)
+    try:
+        oriented = client.head("/api/thumbnails/oriented.jpg?scale=0.5")
+        assert (oriented.headers["x-source-width"], oriented.headers["x-source-height"]) == ("20", "40")
+        assert (oriented.headers["x-thumbnail-width"], oriented.headers["x-thumbnail-height"]) == ("10", "20")
+        alpha = client.get("/api/thumbnails/alpha.png?scale=0.5")
+        with Image.open(io.BytesIO(alpha.content)) as image:
+            assert image.mode == "RGBA" and image.getchannel("A").getextrema() == (128, 128)
+        first = client.get("/api/thumbnails/anim.gif?scale=0.5")
+        with Image.open(io.BytesIO(first.content)) as image:
+            assert image.convert("RGB").getpixel((1, 1))[0] > image.convert("RGB").getpixel((1, 1))[2]
+    finally:
+        _close(client)
+
+
+def test_thumbnail_cache_survives_restart_invalidates_and_recovers_corruption(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    mapping = [{"virtual_path": "x.png", "local_path": "x.png"}]
+    _, first = _client(tmp_path, {"x.png": _image_bytes()}, mapping, cache=cache)
+    try:
+        initial = first.get("/api/thumbnails/x.png?scale=0.5")
+        assert initial.status_code == 200
+    finally:
+        _close(first)
+
+    from flightarchive.thumbnail import ThumbnailService
+    monkeypatch.setattr(ThumbnailService, "_render", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("rendered")))
+    monkeypatch.setattr(ThumbnailService, "_source_get", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("full GET")))
+    _, second = _client(tmp_path, {}, mapping, cache=cache)
+    try:
+        cached = second.get("/api/thumbnails/x.png?scale=0.5")
+        assert cached.status_code == 200 and cached.content == initial.content
+    finally:
+        _close(second)
+
+    monkeypatch.undo()
+    metadata = next(cache.glob("thumb-*.json"))
+    metadata.write_text("not-json", encoding="utf-8")
+    _, third = _client(tmp_path, {}, mapping, cache=cache)
+    try:
+        rebuilt = third.get("/api/thumbnails/x.png?scale=0.5")
+        assert rebuilt.status_code == 200
+        assert json.loads(next(cache.glob("thumb-*.json")).read_text())["sourceEtag"]
+    finally:
+        _close(third)
+
+
+def test_thumbnail_head_never_full_fetches_or_renders(tmp_path, monkeypatch):
+    app, client = _client(tmp_path, {"x.png": _image_bytes()}, [{"virtual_path": "x.png", "local_path": "x.png"}])
+    service = app.state.thumbnail_service
+    monkeypatch.setattr(service, "_source_get", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("full GET")))
+    monkeypatch.setattr(service, "_render", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("render")))
+    try:
+        response = client.head("/api/thumbnails/x.png?scale=0.25")
         assert response.status_code == 200
-        rendered = Image.open(io.BytesIO(response.content)).convert("RGB")
-        assert rendered.size == (200, 100)
-        # Sample well inside every quadrant to avoid rotation and WebP edges.
-        assert max(range(3), key=lambda channel: rendered.getpixel((50, 25))[channel]) == 0  # TL red
-        assert max(range(3), key=lambda channel: rendered.getpixel((150, 25))[channel]) == 1  # TR green
-        assert max(range(3), key=lambda channel: rendered.getpixel((50, 75))[channel]) == 2  # BL blue
-        bottom_right = rendered.getpixel((150, 75))
-        assert bottom_right[0] > 150 and bottom_right[1] > 150 and bottom_right[2] < 100  # BR yellow
+        assert "content-length" not in response.headers
+        assert not (tmp_path / "cache").exists() or not list((tmp_path / "cache").glob("thumb-*"))
+    finally:
+        _close(client)
 
 
-def test_boarding_pass_preview_keeps_an_off_center_rotated_rectangle_inside_source(tmp_path):
-    """A valid rotated rectangle must not inherit clipping from whole-image rotation."""
-    source = Image.new("RGB", (640, 480), "black")
-    center_x, center_y, crop_width, crop_height = 60, 240, 400, 80
-    # This +90° rectangle is narrow in source X and tall in source Y. It is
-    # fully in bounds, although an upright 400px crop around x=60 is not.
-    for x in range(20, 101):
-        for y in range(40, 441):
-            source.putpixel((x, y), (220, 20, 20))
-    buffer = io.BytesIO(); source.save(buffer, "PNG")
-    application, _, _ = app(tmp_path, {"ticket.png": buffer.getvalue()})
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        payload = _flight_payload("inbox/ticket.png")
-        payload["paperBoardingPassLayouts"] = {
-            "paperBoardingPassFront": _layout(center_x=center_x, center_y=center_y, width=crop_width, height=crop_height, rotation=90)
-        }
-        flight = client.post("/api/flights", json=payload).json()["flight"]
-        response = client.get(f"/api/flights/{flight['id']}/boarding-passes/paperBoardingPassFront/preview")
-        assert response.status_code == 200
-        rendered = Image.open(io.BytesIO(response.content)).convert("RGB")
-        # The left side used to be black because Image.rotate clipped it before
-        # the final crop. It is a valid part of the selected source rectangle.
-        assert rendered.getpixel((50, 40))[0] > 150
-
-
-def test_boarding_pass_preview_accepts_inclusive_right_and_bottom_source_edges(tmp_path):
-    application, _, _ = app(tmp_path, {"ticket.png": _image_bytes(size=(640, 480))})
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        payload = _flight_payload("inbox/ticket.png")
-        # ScanStudio's canvas coordinates deliberately use the inclusive outer
-        # boundary, rather than Pillow's half-open pixel sample coordinates.
-        payload["paperBoardingPassLayouts"] = {"paperBoardingPassFront": _layout(center_x=320, center_y=240, width=640, height=480)}
-        flight = client.post("/api/flights", json=payload).json()["flight"]
-        response = client.get(f"/api/flights/{flight['id']}/boarding-passes/paperBoardingPassFront/preview")
-        assert response.status_code == 200
-        assert Image.open(io.BytesIO(response.content)).size == (512, 384)
-
-
-def test_boarding_pass_preview_ignores_legacy_corners_and_rejects_out_of_bounds_rectangle(tmp_path):
-    application, _, _ = app(tmp_path, {"ticket.png": _image_bytes()})
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        payload = _flight_payload("inbox/ticket.png")
-        payload["paperBoardingPassLayouts"] = {"paperBoardingPassFront": _layout([(100, 100), (500, 100), (250, 150), (100, 300)])}
-        created = client.post("/api/flights", json=payload)
-        assert created.status_code == 201
-        flight = created.json()["flight"]
-        url = f"/api/flights/{flight['id']}/boarding-passes/paperBoardingPassFront/preview"
-        first = client.get(url)
-        assert first.status_code == 200
-        # Corrupt legacy corners do not affect the canonical geometry or ETag.
-        application.state.flightarchive_workspace.domain.get_flight(flight["id"]).paperBoardingPassLayouts["paperBoardingPassFront"].crop["corners"] = "ignored"
-        assert client.get(url).headers["etag"] == first.headers["etag"]
-        application.state.flightarchive_workspace.domain.get_flight(flight["id"]).paperBoardingPassLayouts["paperBoardingPassFront"].crop["centerX"] = 10
-        response = client.get(url)
-        assert response.status_code == 422
-        assert response.json()["error"]["code"] == "boarding-pass-preview-unavailable"
-
-
-def test_reconcile_discards_preview_for_missing_source_but_retains_rfg_mapping(tmp_path):
-    application, _, cache = app(tmp_path, {"ticket.png": _image_bytes()})
-    source = tmp_path / "resources" / "ticket.png"
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        payload = _flight_payload("inbox/ticket.png")
-        payload["paperBoardingPassLayouts"] = {"paperBoardingPassFront": _layout(center_x=320, center_y=240, width=600, height=440)}
-        flight = client.post("/api/flights", json=payload).json()["flight"]
-        url = f"/api/flights/{flight['id']}/boarding-passes/paperBoardingPassFront/preview"
-        assert client.get(url).status_code == 200
-        source.unlink()
-        assert client.post("/api/resources/reconcile").status_code == 200
-        # The stable mapping remains available to RFG's rematch workflow, while
-        # its image derivatives are deliberately disposable.
-        assert any(entry["virtual_path"] == flight["paperBoardingPassFrontResourcePath"] for entry in client.get("/api/v1/meta/map").json()["entries"])
-    assert _bindings(cache / DATABASE_PATH) == (0, [])
-
-
-def test_failed_creation_releases_newly_materialized_mapping_and_rebinds_thumbnail(tmp_path, monkeypatch):
-    application, _, cache = app(tmp_path, {"ticket.png": _image_bytes()})
-    workspace = application.state.flightarchive_workspace
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        client.get("/images/inbox/ticket.png")
-        monkeypatch.setattr(workspace, "persist_business_data", lambda: (_ for _ in ()).throw(BusinessDataError("write failed")))
-        failed = client.post("/api/flights", json=_flight_payload("inbox/ticket.png"))
-        assert failed.status_code == 500
-        assert client.get("/api/v1/meta/map").json()["entries"] == [{"virtual_path": "inbox/ticket.png", "local_path": "ticket.png"}]
-    assert _bindings(cache / DATABASE_PATH)[1][0][:2] == ("inbox/ticket.png", "ticket.png")
-
-
-def test_manual_release_rebinds_thumbnail_and_clears_fingerprint_metadata(tmp_path):
-    application, _, cache = app(tmp_path, {"ticket.png": _image_bytes()})
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        assert client.get("/images/inbox/ticket.png").status_code == 200
-        mapping_response = client.get("/api/v1/meta/map")
-        document, etag = mapping_response.json(), mapping_response.headers["etag"]
-        document["entries"][0].update({"virtual_path": "object.png", "size_bytes": 123, "sha256": "stale"})
-        assert client.put("/api/v1/meta/map", json=document, headers={"If-Match": etag}).status_code == 200
-        # This mimics an object mapping with an existing generic cache binding.
-        assert client.get("/images/object.png").status_code == 200
-        etag = client.get("/api/v1/meta/map").headers["etag"]
-        released = client.post("/api/resources/release", json={"ifMatch": etag, "virtualPaths": ["object.png"]})
-        assert released.status_code == 200
-        payload = released.json()
-        assert payload["released"] == ["object.png"]
-        assert set(payload) == {"released", "revision"}
-        entry = client.get("/api/v1/meta/map").json()["entries"][0]
-        assert entry["virtual_path"] == "inbox/ticket.png"
-        assert entry["size_bytes"] == 123 and "sha256" not in entry
-    assert _bindings(cache / DATABASE_PATH)[1][0][:2] == ("inbox/ticket.png", "ticket.png")
-
-
-def test_batch_unignore_rebinds_thumbnail_without_touching_the_source(tmp_path):
-    application, _, cache = app(tmp_path, {"ticket.png": _image_bytes()})
-    root = tmp_path / "resources"
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        assert client.get("/images/inbox/ticket.png").status_code == 200
-        meta = client.get("/api/v1/meta/map")
-        ignored = client.post("/api/resources/ignore", json={"ifMatch": meta.headers["etag"], "virtualPaths": ["inbox/ticket.png"]}).json()["ignored"][0]
-        assert client.get(f"/images/{ignored}").status_code == 200
-        restored = client.post("/api/resources/unignore", json={"ifMatch": client.get("/api/v1/meta/map").headers["etag"], "virtualPaths": [ignored]})
-        assert restored.status_code == 200
-        assert root.joinpath("ticket.png").read_bytes() == _image_bytes()
-    assert _bindings(cache / DATABASE_PATH)[1][0][:2] == ("inbox/ticket.png", "ticket.png")
-
-
-def test_manual_release_rejects_stale_missing_or_referenced_paths_without_changes(tmp_path):
-    application, _, _ = app(tmp_path, {"ticket.png": _image_bytes(), "lost.png": _image_bytes()})
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        document_response = client.get("/api/v1/meta/map")
-        document, etag = document_response.json(), document_response.headers["etag"]
-        entries = {entry["local_path"]: entry for entry in document["entries"]}
-        entries["ticket.png"]["virtual_path"] = "object.png"
-        entries["lost.png"]["virtual_path"] = "lost-object.png"
-        assert client.put("/api/v1/meta/map", json=document, headers={"If-Match": etag}).status_code == 200
-        current = client.get("/api/v1/meta/map")
-        current_etag = current.headers["etag"]
-        flight = client.post("/api/flights", json=_flight_payload("object.png"))
-        assert flight.status_code == 201
-        before = client.get("/api/v1/meta/map").json()
-        assert client.post("/api/resources/release", json={"ifMatch": '"stale"', "virtualPaths": ["lost-object.png"]}).status_code == 409
-        assert client.get("/api/v1/meta/map").json() == before
-        assert client.post("/api/resources/release", json={"ifMatch": current_etag, "virtualPaths": ["object.png"]}).status_code == 409
-        assert client.get("/api/v1/meta/map").json() == before
-        (tmp_path / "resources" / "lost.png").unlink()
-        assert client.post("/api/resources/release", json={"ifMatch": None, "virtualPaths": ["lost-object.png"]}).status_code == 409
-        assert client.get("/api/v1/meta/map").json() == before
-        assert client.post("/api/resources/release", json={"ifMatch": None, "virtualPaths": ["missing.png"]}).status_code == 409
-        assert client.get("/api/v1/meta/map").json() == before
-
-
-def test_failed_automatic_release_is_repaired_by_a_later_reconcile(tmp_path, monkeypatch):
-    application, _, _ = app(tmp_path, {"ticket.png": _image_bytes()})
-    lifecycle = application.state.resource_lifecycle
-    original_request = lifecycle._request
-    fail_once = True
-
-    async def transient_put(method, path, **kwargs):
-        nonlocal fail_once
-        if method == "PUT" and path == "/api/v1/meta/map" and fail_once:
-            fail_once = False
-            class FailedResponse:
-                status_code = 503
-            return FailedResponse()
-        return await original_request(method, path, **kwargs)
-
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        flight = client.post("/api/flights", json=_flight_payload("inbox/ticket.png")).json()["flight"]
-        monkeypatch.setattr(lifecycle, "_request", transient_put)
-        assert client.delete(f"/api/flights/{flight['id']}").status_code == 200
-        assert lifecycle.deferred_releases
-        assert client.post("/api/resources/reconcile").status_code == 200
-        assert not lifecycle.deferred_releases
-        assert client.get("/api/v1/meta/map").json()["entries"][0]["virtual_path"] == "inbox/ticket.png"
-
-
-def test_manual_release_waits_for_the_business_resource_critical_section(tmp_path):
-    application, _, _ = app(tmp_path, {"ticket.png": _image_bytes()})
-    lifecycle = application.state.resource_lifecycle
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        document_response = client.get("/api/v1/meta/map")
-        document, etag = document_response.json(), document_response.headers["etag"]
-        document["entries"][0]["virtual_path"] = "object.png"
-        assert client.put("/api/v1/meta/map", json=document, headers={"If-Match": etag}).status_code == 200
-        etag = client.get("/api/v1/meta/map").headers["etag"]
-
-        async def exercise():
-            async with lifecycle.business_lock:
-                task = asyncio.create_task(lifecycle.release({"ifMatch": etag, "virtualPaths": ["object.png"]}))
-                await asyncio.sleep(0)
-                assert not task.done()
-            return await task
-
-        assert asyncio.run(exercise())["released"] == ["object.png"]
-
-
-def test_workspace_reset_releases_resources_and_discards_old_previews(tmp_path):
-    application, _, cache = app(tmp_path, {"ticket.png": _image_bytes()})
-    with TestClient(application) as client:
-        client.post("/api/resources/reconcile")
-        payload = _flight_payload("inbox/ticket.png")
-        payload["paperBoardingPassLayouts"] = {"paperBoardingPassFront": _layout([(20, 20), (620, 20), (620, 460), (20, 460)])}
-        flight = client.post("/api/flights", json=payload).json()["flight"]
-        assert client.get(f"/api/flights/{flight['id']}/boarding-passes/paperBoardingPassFront/preview").status_code == 200
-        assert client.post("/api/workspace/reset").status_code == 200
-        assert client.get("/api/v1/meta/map").json()["entries"][0]["virtual_path"] == "inbox/ticket.png"
-    assert all(not path.startswith("preview/") for path, _, _ in _bindings(cache / DATABASE_PATH)[1])
-
-
-def test_application_shutdown_closes_thumbnail_store(tmp_path, monkeypatch):
-    application, _, _ = app(tmp_path, {})
-    store = application.state.thumbnail_store
-    original_close = store.close
+def test_thumbnail_source_change_invalidates_and_mid_get_retries_without_old_cache(tmp_path, monkeypatch):
+    old = _image_bytes(size=(80, 40))
+    new = _image_bytes(size=(96, 48))
+    app, client = _client(tmp_path, {"x.png": old}, [{"virtual_path": "x.png", "local_path": "x.png"}])
+    resource = tmp_path / "resources" / "x.png"
+    service = app.state.thumbnail_service
+    original_get = service._source_get
     calls = 0
 
-    def observed_close():
+    async def change_before_first_get(virtual_path, source):
         nonlocal calls
         calls += 1
-        original_close()
+        if calls == 1:
+            resource.write_bytes(new)
+        return await original_get(virtual_path, source)
 
-    monkeypatch.setattr(store, "close", observed_close)
-    with TestClient(application):
-        pass
-
-    assert calls == 1
-    # Closing is idempotent, while database operations prove the connection is
-    # no longer usable after application shutdown.
-    original_close()
+    monkeypatch.setattr(service, "_source_get", change_before_first_get)
     try:
-        store._db.execute("SELECT 1")
-    except sqlite3.ProgrammingError:
-        pass
-    else:
-        raise AssertionError("thumbnail database connection remained open")
+        result = client.get("/api/thumbnails/x.png?scale=0.5")
+        assert result.status_code == 200 and calls == 2, result.text
+        assert result.headers["x-source-width"] == "96"
+        assert result.headers["x-thumbnail-width"] == "48"
+        documents = [json.loads(path.read_text()) for path in (tmp_path / "cache").glob("thumb-*.json")]
+        assert len(documents) == 1 and documents[0]["sourceEtag"] == result.headers["x-source-etag"]
+    finally:
+        _close(client)
+
+
+def test_thumbnail_rebind_same_virtual_path_uses_new_source_version(tmp_path):
+    mapping = [{"virtual_path": "stable/scan.png", "local_path": "first.png"}]
+    _, client = _client(tmp_path, {
+        "first.png": _image_bytes(size=(80, 40)),
+        "second.png": _image_bytes(size=(120, 60)),
+    }, mapping)
+    try:
+        first = client.get("/api/thumbnails/stable/scan.png?scale=0.5")
+        assert first.status_code == 200 and first.headers["x-thumbnail-width"] == "40"
+        rematched = client.put("/api/v1/meta/map", json={"entries": [{
+            "virtual_path": "stable/scan.png", "local_path": "second.png",
+        }]})
+        assert rematched.status_code == 200
+        second = client.get("/api/thumbnails/stable/scan.png?scale=0.5")
+        assert second.status_code == 200 and second.headers["x-thumbnail-width"] == "60"
+        assert second.headers["x-source-etag"] != first.headers["x-source-etag"]
+        assert second.headers["etag"] != first.headers["etag"]
+    finally:
+        _close(client)
+
+
+def test_thumbnail_requests_do_not_mutate_mapping_or_archive_documents(tmp_path):
+    app, client = _client(tmp_path, {"x.png": _image_bytes()}, [{"virtual_path": "x.png", "local_path": "x.png"}])
+    runtime = tmp_path / "runtime"
+    archive = runtime / "flightarchive" / "v2"
+    archive.mkdir(parents=True)
+    sentinel = archive / "flights.json"
+    sentinel.write_text("[]\n", encoding="utf-8")
+    mapping_before = client.get("/api/v1/meta/map")
+    archive_before = (sentinel.read_bytes(), sentinel.stat().st_mtime_ns)
+    try:
+        assert client.head("/api/thumbnails/x.png").status_code == 200
+        assert client.get("/api/thumbnails/x.png").status_code == 200
+        mapping_after = client.get("/api/v1/meta/map")
+        assert mapping_after.json() == mapping_before.json()
+        assert mapping_after.headers.get("etag") == mapping_before.headers.get("etag")
+        assert (sentinel.read_bytes(), sentinel.stat().st_mtime_ns) == archive_before
+    finally:
+        _close(client)
+
+
+def test_thumbnail_deleted_or_unavailable_cache_still_returns_rendered_bytes(tmp_path):
+    cache = tmp_path / "cache"
+    mapping = [{"virtual_path": "x.png", "local_path": "x.png"}]
+    _, first = _client(tmp_path, {"x.png": _image_bytes()}, mapping, cache=cache)
+    try:
+        assert first.get("/api/thumbnails/x.png").status_code == 200
+    finally:
+        _close(first)
+    for path in cache.iterdir():
+        path.unlink()
+    cache.rmdir()
+    _, second = _client(tmp_path, {}, mapping, cache=cache)
+    try:
+        assert second.get("/api/thumbnails/x.png").status_code == 200
+        assert cache.is_dir()
+    finally:
+        _close(second)
+
+    for path in cache.iterdir():
+        path.unlink()
+    cache.rmdir()
+    cache.write_text("not-a-directory", encoding="utf-8")
+    _, third = _client(tmp_path, {}, mapping, cache=cache)
+    try:
+        assert third.get("/api/thumbnails/x.png").status_code == 200
+        assert cache.read_text(encoding="utf-8") == "not-a-directory"
+    finally:
+        _close(third)
+
+
+def test_large_jpeg_uses_decoder_draft_before_load(tmp_path, monkeypatch):
+    # 140 MP is intentional: it is a valid scan, while the dyadic JPEG draft
+    # keeps the decoded working bitmap bounded before the exact resize.
+    source = io.BytesIO()
+    image = Image.new("L", (14_000, 10_000), 127)
+    image.save(source, "JPEG", quality=70)
+    image.close()
+    observed_load_sizes = []
+    original_load = Image.Image.load
+
+    def observed_load(self, *args, **kwargs):
+        if getattr(self, "format", None) == "JPEG":
+            observed_load_sizes.append(self.size)
+        return original_load(self, *args, **kwargs)
+
+    monkeypatch.setattr(Image.Image, "load", observed_load)
+    _, client = _client(tmp_path, {"large.jpg": source.getvalue()}, [{
+        "virtual_path": "large.jpg", "local_path": "large.jpg",
+    }])
+    try:
+        response = client.get("/api/thumbnails/large.jpg?scale=0.015625")
+        assert response.status_code == 200
+        assert response.headers["x-source-width"] == "14000"
+        assert response.headers["x-thumbnail-width"] == "218"
+        assert observed_load_sizes and max(width * height for width, height in observed_load_sizes) < 3_000_000
+    finally:
+        _close(client)
+
+
+def test_thumbnail_cache_budget_does_not_touch_unrelated_files(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    unrelated = cache / "keep.txt"
+    unrelated.write_text("safe", encoding="utf-8")
+    from flightarchive import thumbnail
+    monkeypatch.setattr(thumbnail, "MAX_CACHE_BYTES", 1)
+    _, client = _client(tmp_path, {"x.png": _image_bytes()}, [{"virtual_path": "x.png", "local_path": "x.png"}], cache=cache)
+    try:
+        assert client.get("/api/thumbnails/x.png").status_code == 200
+    finally:
+        _close(client)
+    assert unrelated.read_text(encoding="utf-8") == "safe"
+
+
+def test_thumbnail_cache_symlink_is_never_followed(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "marker"
+    marker.write_text("safe", encoding="utf-8")
+    cache = tmp_path / "cache"
+    cache.symlink_to(outside, target_is_directory=True)
+    _, client = _client(tmp_path, {"x.png": _image_bytes()}, [{"virtual_path": "x.png", "local_path": "x.png"}], cache=cache)
+    try:
+        response = client.get("/api/thumbnails/x.png")
+        assert response.status_code == 200
+    finally:
+        _close(client)
+    assert marker.read_text(encoding="utf-8") == "safe"
+    assert list(outside.iterdir()) == [marker]
+
+
+def test_thumbnail_cache_leaf_symlink_is_never_followed(tmp_path):
+    cache = tmp_path / "cache"
+    mapping = [{"virtual_path": "x.png", "local_path": "x.png"}]
+    _, first = _client(tmp_path, {"x.png": _image_bytes()}, mapping, cache=cache)
+    try:
+        assert first.get("/api/thumbnails/x.png").status_code == 200
+    finally:
+        _close(first)
+    blob = next(cache.glob("thumb-*.webp"))
+    blob.unlink()
+    outside = tmp_path / "outside.webp"
+    outside.write_bytes(b"safe")
+    blob.symlink_to(outside)
+    _, second = _client(tmp_path, {}, mapping, cache=cache)
+    try:
+        assert second.get("/api/thumbnails/x.png").status_code == 200
+    finally:
+        _close(second)
+    assert blob.is_symlink() and outside.read_bytes() == b"safe"
+
+
+def test_requested_output_over_limits_is_413(tmp_path):
+    _, client = _client(tmp_path, {"large.png": _image_bytes(size=(2100, 2000))}, [{
+        "virtual_path": "large.png", "local_path": "large.png",
+    }])
+    try:
+        assert client.head("/api/thumbnails/large.png?scale=1").status_code == 413
+    finally:
+        _close(client)
+
+
+@pytest.mark.parametrize("method", ["head", "get"])
+def test_thumbnail_maps_pillow_decompression_bomb_to_dimension_413(tmp_path, monkeypatch, method):
+    payload = _image_bytes(size=(80, 40))
+    _, client = _client(tmp_path, {"x.png": payload}, [{"virtual_path": "x.png", "local_path": "x.png"}])
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1)
+    try:
+        response = getattr(client, method)("/api/thumbnails/x.png?scale=0.125")
+        assert response.status_code == 413
+        if method == "get":
+            assert response.json()["error"]["code"] == "thumbnail-source-dimensions-too-large"
+    finally:
+        _close(client)
+
+
+@pytest.mark.parametrize("mutation", [
+    {"scale": "0.25"},
+    {"renderProfile": "other"},
+    {"sourceWidth": True},
+    {"sourceBytesAsFloat": True},
+    {"sourceWidth": 80_000},
+    {"thumbnailWidth": 41},
+    {"format": "TIFF"},
+])
+def test_thumbnail_rejects_forged_cached_geometry_and_profile(tmp_path, monkeypatch, mutation):
+    cache = tmp_path / "cache"
+    mapping = [{"virtual_path": "x.png", "local_path": "x.png"}]
+    _, first = _client(tmp_path, {"x.png": _image_bytes(size=(80, 40))}, mapping, cache=cache)
+    try:
+        initial = first.get("/api/thumbnails/x.png?scale=0.5")
+        assert initial.status_code == 200
+    finally:
+        _close(first)
+
+    metadata_path = next(cache.glob("thumb-*.json"))
+    metadata = json.loads(metadata_path.read_text())
+    metadata.update(mutation)
+    if metadata.pop("sourceBytesAsFloat", False):
+        metadata["sourceBytes"] = float(metadata["sourceBytes"])
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    from flightarchive.thumbnail import ThumbnailService
+    calls = 0
+    original = ThumbnailService._render
+    def observed(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+    monkeypatch.setattr(ThumbnailService, "_render", staticmethod(observed))
+    _, second = _client(tmp_path, {}, mapping, cache=cache)
+    try:
+        rebuilt = second.get("/api/thumbnails/x.png?scale=0.5")
+        assert rebuilt.status_code == 200
+        assert rebuilt.headers["x-source-width"] == "80"
+        assert rebuilt.headers["x-thumbnail-width"] == "40"
+        assert calls == 1
+    finally:
+        _close(second)
+
+
+def test_thumbnail_rejects_self_consistent_forged_source_geometry_and_webp_header(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    mapping = [{"virtual_path": "x.png", "local_path": "x.png"}]
+    _, first = _client(tmp_path, {"x.png": _image_bytes(size=(80, 40))}, mapping, cache=cache)
+    try:
+        assert first.get("/api/thumbnails/x.png?scale=0.5").status_code == 200
+    finally:
+        _close(first)
+
+    blob_path = next(cache.glob("thumb-*.webp"))
+    metadata_path = next(cache.glob("thumb-*.json"))
+    forged = _image_bytes(fmt="WEBP", size=(50, 25))
+    blob_path.write_bytes(forged)
+    metadata = json.loads(metadata_path.read_text())
+    metadata.update({
+        "sourceWidth": 100, "sourceHeight": 50,
+        "thumbnailWidth": 50, "thumbnailHeight": 25,
+        "encodedBytes": len(forged),
+        "blobSha256": __import__("hashlib").sha256(forged).hexdigest(),
+    })
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    from flightarchive.thumbnail import ThumbnailService
+    calls = 0
+    original = ThumbnailService._render
+    def observed(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+    monkeypatch.setattr(ThumbnailService, "_render", staticmethod(observed))
+    _, second = _client(tmp_path, {}, mapping, cache=cache)
+    try:
+        rebuilt = second.get("/api/thumbnails/x.png?scale=0.5")
+        assert rebuilt.status_code == 200
+        assert rebuilt.headers["x-source-width"] == "80"
+        assert rebuilt.headers["x-thumbnail-width"] == "40"
+        assert calls == 1
+    finally:
+        _close(second)
+
+
+def test_thumbnail_cache_evicts_complete_pairs_and_only_owned_orphans(tmp_path, monkeypatch):
+    from flightarchive import thumbnail
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    unrelated = cache / "keep.txt"
+    unrelated.write_text("safe", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.write_text("safe", encoding="utf-8")
+    symlink = cache / ("thumb-" + "f" * 64 + ".webp")
+    symlink.symlink_to(outside)
+    orphan = cache / ("thumb-" + "e" * 64 + ".json")
+    orphan.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(thumbnail, "MAX_CACHE_BYTES", 600)
+
+    mapping = [
+        {"virtual_path": "a.png", "local_path": "a.png"},
+        {"virtual_path": "b.png", "local_path": "b.png"},
+    ]
+    _, client = _client(tmp_path, {"a.png": _image_bytes(size=(120, 80)), "b.png": _image_bytes(size=(120, 80))}, mapping, cache=cache)
+    try:
+        assert client.get("/api/thumbnails/a.png?scale=0.5").status_code == 200
+        assert client.get("/api/thumbnails/b.png?scale=0.5").status_code == 200
+    finally:
+        _close(client)
+
+    regular_owned = [p for p in cache.iterdir() if p.is_file() and not p.is_symlink() and p.name.startswith("thumb-")]
+    grouped = {}
+    for path in regular_owned:
+        grouped.setdefault(path.stem, set()).add(path.suffix)
+    assert grouped
+    assert all(suffixes == {".webp", ".json"} for suffixes in grouped.values())
+    assert not orphan.exists()
+    assert unrelated.read_text(encoding="utf-8") == "safe"
+    assert symlink.is_symlink() and outside.read_text(encoding="utf-8") == "safe"
+
+
+def test_inspect_rejects_ignored_large_range_without_consuming_body(tmp_path):
+    from flightarchive.thumbnail import MAX_HEADER_BYTES, SourceIdentity, ThumbnailService, ThumbnailError
+
+    class Response:
+        status_code = 200
+        headers = {"etag": '"v1"'}
+        consumed = False
+        async def aiter_bytes(self):
+            self.consumed = True
+            yield b"x" * (MAX_HEADER_BYTES + 1)
+
+    response = Response()
+    class Context:
+        async def __aenter__(self): return response
+        async def __aexit__(self, *args): return None
+    class Client:
+        def stream(self, *args, **kwargs): return Context()
+
+    service = object.__new__(ThumbnailService)
+    service._client = Client()
+    import asyncio
+    with pytest.raises(ThumbnailError) as caught:
+        asyncio.run(service._inspect("x.png", SourceIdentity('"v1"', MAX_HEADER_BYTES + 1), 0.5))
+    assert caught.value.code == "resource-range-unavailable"
+    assert response.consumed is False
+
+
+
+def test_thumbnail_rejects_cached_webp_header_dimension_mismatch(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    mapping = [{"virtual_path": "x.png", "local_path": "x.png"}]
+    _, first = _client(tmp_path, {"x.png": _image_bytes(size=(80, 40))}, mapping, cache=cache)
+    try:
+        assert first.get("/api/thumbnails/x.png?scale=0.5").status_code == 200
+    finally:
+        _close(first)
+
+    blob_path = next(cache.glob("thumb-*.webp"))
+    metadata_path = next(cache.glob("thumb-*.json"))
+    forged = _image_bytes(fmt="WEBP", size=(39, 20))
+    blob_path.write_bytes(forged)
+    metadata = json.loads(metadata_path.read_text())
+    metadata.update({
+        "encodedBytes": len(forged),
+        "blobSha256": __import__("hashlib").sha256(forged).hexdigest(),
+    })
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    from flightarchive.thumbnail import ThumbnailService
+    calls = 0
+    original = ThumbnailService._render
+    def observed(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+    monkeypatch.setattr(ThumbnailService, "_render", staticmethod(observed))
+    _, second = _client(tmp_path, {}, mapping, cache=cache)
+    try:
+        rebuilt = second.get("/api/thumbnails/x.png?scale=0.5")
+        assert rebuilt.status_code == 200
+        assert rebuilt.headers["x-thumbnail-width"] == "40"
+        assert calls == 1
+    finally:
+        _close(second)
+
+
+def test_thumbnail_retries_when_source_etag_changes_during_prefix_inspection(tmp_path, monkeypatch):
+    old = _image_bytes(size=(80, 40))
+    new = _image_bytes(size=(96, 48))
+    app, client = _client(tmp_path, {"x.png": old}, [{"virtual_path": "x.png", "local_path": "x.png"}])
+    resource = tmp_path / "resources" / "x.png"
+    service = app.state.thumbnail_service
+    original_inspect = service._inspect
+    calls = 0
+
+    async def change_before_first_prefix(virtual_path, source, scale):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            resource.write_bytes(new)
+        return await original_inspect(virtual_path, source, scale)
+
+    monkeypatch.setattr(service, "_inspect", change_before_first_prefix)
+    try:
+        response = client.get("/api/thumbnails/x.png?scale=0.5")
+        assert response.status_code == 200
+        assert calls == 2
+        assert response.headers["x-source-width"] == "96"
+    finally:
+        _close(client)
+
+
+
+def test_thumbnail_cached_head_retries_source_change_during_prefix_validation(tmp_path, monkeypatch):
+    old = _image_bytes(size=(80, 40))
+    new = _image_bytes(size=(96, 48))
+    app, client = _client(tmp_path, {"x.png": old}, [{"virtual_path": "x.png", "local_path": "x.png"}])
+    try:
+        assert client.get("/api/thumbnails/x.png?scale=0.5").status_code == 200
+        resource = tmp_path / "resources" / "x.png"
+        service = app.state.thumbnail_service
+        original_inspect = service._inspect
+        calls = 0
+
+        async def change_before_cached_prefix(virtual_path, source, scale):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                resource.write_bytes(new)
+            return await original_inspect(virtual_path, source, scale)
+
+        monkeypatch.setattr(service, "_inspect", change_before_cached_prefix)
+        response = client.head("/api/thumbnails/x.png?scale=0.5")
+        assert response.status_code == 200
+        assert calls == 2
+        assert response.headers["x-source-width"] == "96"
+        assert response.headers["x-thumbnail-width"] == "48"
+    finally:
+        _close(client)
+
+
+def test_inspect_prefix_reads_png_geometry_without_pixel_decode(monkeypatch):
+    from PIL.PngImagePlugin import PngImageFile
+
+    from flightarchive.thumbnail import ThumbnailService
+
+    payload = _image_bytes(size=(320, 200))
+    loads = []
+    original_load = PngImageFile.load
+
+    def observed_load(self, *args, **kwargs):
+        loads.append(self.size)
+        return original_load(self, *args, **kwargs)
+
+    monkeypatch.setattr(PngImageFile, "load", observed_load)
+    geometry = ThumbnailService._inspect_prefix(payload, 0.5)
+    assert (geometry.source_width, geometry.source_height) == (320, 200)
+    assert (geometry.thumbnail_width, geometry.thumbnail_height) == (160, 100)
+    assert geometry.format == "PNG"
+    assert loads == []
+
+
+def test_inspect_prefix_applies_png_header_exif_without_pixel_decode(monkeypatch):
+    from PIL.PngImagePlugin import PngImageFile
+
+    from flightarchive.thumbnail import ThumbnailService
+
+    exif = Image.Exif()
+    exif[274] = 6
+    payload = _image_bytes(size=(80, 40), exif=exif)
+    loads = []
+    original_load = PngImageFile.load
+
+    def observed_load(self, *args, **kwargs):
+        loads.append(self.size)
+        return original_load(self, *args, **kwargs)
+
+    monkeypatch.setattr(PngImageFile, "load", observed_load)
+    geometry = ThumbnailService._inspect_prefix(payload, 0.5)
+    assert (geometry.source_width, geometry.source_height) == (40, 80)
+    assert (geometry.thumbnail_width, geometry.thumbnail_height) == (20, 40)
+    assert loads == []
+
+
+def test_thumbnail_head_of_png_larger_than_prefix_returns_geometry_without_pixel_decode(tmp_path, monkeypatch):
+    from PIL.PngImagePlugin import PngImageFile
+
+    from flightarchive.thumbnail import MAX_HEADER_BYTES
+
+    payload = _noisy_png_bytes()
+    assert len(payload) > MAX_HEADER_BYTES
+    app, client = _client(tmp_path, {"noisy.png": payload}, [{
+        "virtual_path": "noisy.png", "local_path": "noisy.png",
+    }])
+    service = app.state.thumbnail_service
+    monkeypatch.setattr(service, "_source_get", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("full GET")))
+    monkeypatch.setattr(service, "_render", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("render")))
+    loads = []
+    original_load = PngImageFile.load
+
+    def observed_load(self, *args, **kwargs):
+        loads.append(self.size)
+        return original_load(self, *args, **kwargs)
+
+    monkeypatch.setattr(PngImageFile, "load", observed_load)
+    try:
+        response = client.head("/api/thumbnails/noisy.png?scale=0.5")
+        assert response.status_code == 200, response.text
+        assert response.headers["x-source-width"] == "1024"
+        assert response.headers["x-source-height"] == "768"
+        assert response.headers["x-thumbnail-width"] == "512"
+        assert response.headers["x-thumbnail-height"] == "384"
+        assert "content-length" not in response.headers
+        assert loads == []
+    finally:
+        _close(client)
+
+
+def test_thumbnail_cached_head_validates_without_render_full_source_or_pixel_decode(tmp_path, monkeypatch):
+    from PIL.PngImagePlugin import PngImageFile
+
+    payload = _image_bytes(size=(80, 40))
+    mapping = [{"virtual_path": "x.png", "local_path": "x.png"}]
+    _, first = _client(tmp_path, {"x.png": payload}, mapping)
+    try:
+        assert first.get("/api/thumbnails/x.png?scale=0.5").status_code == 200
+    finally:
+        _close(first)
+
+    app, second = _client(tmp_path, {}, mapping)
+    service = app.state.thumbnail_service
+    monkeypatch.setattr(service, "_source_get", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("full GET")))
+    monkeypatch.setattr(service, "_render", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("render")))
+    loads = []
+    original_load = PngImageFile.load
+
+    def observed_load(self, *args, **kwargs):
+        loads.append(self.size)
+        return original_load(self, *args, **kwargs)
+
+    monkeypatch.setattr(PngImageFile, "load", observed_load)
+    try:
+        response = second.head("/api/thumbnails/x.png?scale=0.5")
+        assert response.status_code == 200
+        assert response.headers["content-length"]
+        assert loads == []
+    finally:
+        _close(second)
+
+
+def test_small_png_late_exif_in_prefix_has_normalized_head_and_matching_pixels(tmp_path, monkeypatch):
+    from PIL.PngImagePlugin import PngImageFile
+
+    payload = _png_with_exif_after_idat(size=(80, 40), orientation=6)
+    app, client = _client(tmp_path, {"late.png": payload}, [{
+        "virtual_path": "late.png", "local_path": "late.png",
+    }])
+    loads = []
+    original_load = PngImageFile.load
+
+    def observed_load(self, *args, **kwargs):
+        loads.append(self.size)
+        return original_load(self, *args, **kwargs)
+
+    monkeypatch.setattr(PngImageFile, "load", observed_load)
+    try:
+        head = client.head("/api/thumbnails/late.png?scale=0.5")
+        assert head.status_code == 200
+        assert (head.headers["x-source-width"], head.headers["x-source-height"]) == ("40", "80")
+        assert (head.headers["x-thumbnail-width"], head.headers["x-thumbnail-height"]) == ("20", "40")
+        assert head.headers["x-source-bytes"] == str(len(payload))
+        assert loads == []
+
+        result = client.get("/api/thumbnails/late.png?scale=0.5")
+        assert result.status_code == 200, result.text
+        assert result.headers["x-source-bytes"] == str(len(payload))
+        with Image.open(io.BytesIO(result.content)) as image:
+            assert image.size == (20, 40)
+            rgb = image.convert("RGB")
+            top = rgb.getpixel((10, 5))
+            bottom = rgb.getpixel((10, 35))
+            assert top[0] > 180 and top[2] < 80
+            assert bottom[2] > 180 and bottom[0] < 80
+    finally:
+        _close(client)
+
+
+def test_png_exif_beyond_prefix_is_rejected_without_cache(tmp_path):
+    from flightarchive.thumbnail import MAX_HEADER_BYTES
+
+    exif = Image.Exif()
+    exif[274] = 6
+    payload = _move_png_exif_after_idat(_noisy_png_bytes(size=(1024, 768), exif=exif))
+    assert len(payload) > MAX_HEADER_BYTES
+    assert payload.find(b"eXIf") > MAX_HEADER_BYTES
+    _, client = _client(tmp_path, {"late.png": payload}, [{
+        "virtual_path": "late.png", "local_path": "late.png",
+    }])
+    try:
+        response = client.get("/api/thumbnails/late.png?scale=0.5")
+        assert response.status_code == 415
+        assert response.json()["error"]["code"] == "unsupported-header-orientation"
+        assert not (tmp_path / "cache").exists() or not list((tmp_path / "cache").glob("thumb-*"))
+    finally:
+        _close(client)

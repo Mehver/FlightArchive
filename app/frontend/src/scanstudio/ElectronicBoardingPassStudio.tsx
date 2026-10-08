@@ -20,8 +20,9 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
-import { api } from '../api/client';
+import { useBusinessData } from '../domain/BusinessDataProvider';
 import { resourceUrl } from '../rfg/api';
+import { assertDecodedLimits, loadBoundedSource } from '../resources/browserImageRenderer';
 import { useTranslation } from '../i18n';
 import { useAppState } from '../state/AppState';
 import { isValidHexColor, type HexColor } from '../theme/colors';
@@ -57,6 +58,7 @@ function validHexOrNull(color: unknown): HexColor | null {
 export function ElectronicBoardingPassStudio({ open, flight, onSaved, onClose }: ScanStudioDialogProps) {
   const { t } = useTranslation();
   const { notify, showError } = useAppState();
+  const business = useBusinessData();
   const dialogScale = useDialogScale();
   const resourcePath = flight.electronicBoardingPassResourcePath;
   const savedCrop = flight.electronicBoardingPass?.extraction?.crop;
@@ -96,11 +98,16 @@ export function ElectronicBoardingPassStudio({ open, flight, onSaved, onClose }:
   useEffect(() => {
     if (!open || !resourcePath) return;
     initialCropRestoredRef.current = false;
+    setImage(null);
+    setImageError(false);
     let cancelled = false;
+    const controller = new AbortController();
+    let sourceUrl: string | null = null;
     const element = new Image();
     element.crossOrigin = 'anonymous';
     element.onload = () => {
       if (cancelled) return;
+      try { assertDecodedLimits(element.naturalWidth, element.naturalHeight); } catch { setImageError(true); return; }
       setImage(element);
       const bounds = { width: element.naturalWidth, height: element.naturalHeight };
       const local = loadElectronicLastCrop();
@@ -119,9 +126,17 @@ export function ElectronicBoardingPassStudio({ open, flight, onSaved, onClose }:
     element.onerror = () => {
       if (!cancelled) setImageError(true);
     };
-    element.src = resourceUrl(resourcePath);
+    void loadBoundedSource(resourceUrl(resourcePath), controller.signal).then((blob) => {
+      if (cancelled) return;
+      sourceUrl = URL.createObjectURL(blob);
+      element.src = sourceUrl;
+    }, (reason: unknown) => {
+      if (!cancelled && !(reason instanceof DOMException && reason.name === 'AbortError')) setImageError(true);
+    });
     return () => {
       cancelled = true;
+      controller.abort();
+      if (sourceUrl) URL.revokeObjectURL(sourceUrl);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, resourcePath]);
@@ -131,17 +146,8 @@ export function ElectronicBoardingPassStudio({ open, flight, onSaved, onClose }:
   useEffect(() => {
     if (!open) return;
     clearLegacyElectronicCropPresetCache();
-    let cancelled = false;
-    setPresets([]);
-    void api.listFlights()
-      .then(({ flights }) => {
-        if (!cancelled) setPresets(electronicCropPresetsFromFlights(flights));
-      })
-      .catch(() => {
-        if (!cancelled) setPresets([]);
-      });
-    return () => { cancelled = true; };
-  }, [open]);
+    setPresets(electronicCropPresetsFromFlights(business.data?.flights ?? []));
+  }, [business.data?.flights, open]);
 
   /** Apply a crop edit, keeping the region in bounds and pinned when mirroring. */
   const applyCrop = (next: ElectronicCropRegion, mirrorOverride = mirror) => {
@@ -219,7 +225,7 @@ export function ElectronicBoardingPassStudio({ open, flight, onSaved, onClose }:
     const name = presetName.trim().slice(0, PRESET_NAME_MAX_LENGTH) || DEFAULT_PRESET_NAME;
     const normalized = normalizeElectronicCrop(crop, imageBounds);
     try {
-      const result = await api.updateFlight(flight.id, {
+      const result = business.updateFlight(flight.id, {
         electronicBoardingPass: {
           schemaVersion: 1,
           extraction: {
@@ -229,8 +235,9 @@ export function ElectronicBoardingPassStudio({ open, flight, onSaved, onClose }:
         },
         boardingPassColor: boardingPassColor ?? null,
       });
+      await business.saveDocument('flights.json');
       notify(t('studioSaved'), 'success', { action: t('studioSave'), form: t('electronicBoardingPass') });
-      onSaved(result.flight);
+      onSaved(result);
       onClose();
     } catch (error) {
       showError(error, t('studioSaveFailed'), { action: t('studioSave'), form: t('electronicBoardingPass') });

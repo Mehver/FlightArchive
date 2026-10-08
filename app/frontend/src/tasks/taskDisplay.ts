@@ -2,18 +2,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 /**
- * Pure display/state helpers for the background-tasks page. The backend
- * (GET /api/tasks) is authoritative; these helpers only decide ordering,
- * counts, progress and status coloring for the read-only view.
+ * Pure rendering helpers for static legacy fingerprint records.
  */
 
 import type { TaskRecord, TaskState } from '../api/types';
 import type { TranslationKey } from '../i18n';
-
-/** A task that still has work ahead of it drives the fast poll cadence. */
-export function isTaskActive(task: Pick<TaskRecord, 'state'>): boolean {
-  return task.state === 'queued' || task.state === 'running';
-}
 
 /** Newest first by createdAt; ties break on id so the order is stable. The input array is not mutated. */
 export function sortTasksNewestFirst(tasks: readonly TaskRecord[]): TaskRecord[] {
@@ -21,34 +14,6 @@ export function sortTasksNewestFirst(tasks: readonly TaskRecord[]): TaskRecord[]
     const byCreated = Date.parse(b.createdAt) - Date.parse(a.createdAt);
     return byCreated !== 0 ? byCreated : b.id.localeCompare(a.id);
   });
-}
-
-export interface TaskStateCounts {
-  total: number;
-  active: number;
-  queued: number;
-  running: number;
-  succeeded: number;
-  failed: number;
-}
-
-/** Header count summary across all tasks currently in the registry. */
-export function countTasksByState(tasks: readonly TaskRecord[]): TaskStateCounts {
-  const counts: TaskStateCounts = { total: tasks.length, active: 0, queued: 0, running: 0, succeeded: 0, failed: 0 };
-  for (const task of tasks) {
-    counts[task.state] += 1;
-    if (isTaskActive(task)) counts.active += 1;
-  }
-  return counts;
-}
-
-/**
- * Determinate progress fraction in [0, 1], or null when the total is not
- * positive (the progress bar then renders indeterminate).
- */
-export function taskProgress(task: Pick<TaskRecord, 'completed' | 'total'>): number | null {
-  if (!Number.isFinite(task.total) || task.total <= 0) return null;
-  return Math.min(1, Math.max(0, task.completed / task.total));
 }
 
 export type TaskStateColor = 'default' | 'info' | 'success' | 'error';

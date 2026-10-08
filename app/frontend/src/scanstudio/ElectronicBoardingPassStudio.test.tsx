@@ -12,13 +12,14 @@ import { ELECTRONIC_CROP_PRESETS_STORAGE_KEY } from './electronicCropPresets';
 
 const mocks = vi.hoisted(() => ({
   updateFlight: vi.fn(),
-  listFlights: vi.fn(),
+  flights: [] as FlightRecord[],
 }));
 
-vi.mock('../api/client', () => ({
-  api: { updateFlight: mocks.updateFlight, listFlights: mocks.listFlights },
+vi.mock('../domain/BusinessDataProvider', () => ({
+  useBusinessData: () => ({ data: { flights: mocks.flights }, updateFlight: mocks.updateFlight, saveDocument: vi.fn().mockResolvedValue({ ok: true }) }),
 }));
-vi.mock('../rfg/api', () => ({ resourceUrl: (path: string) => `/images/${path}` }));
+vi.mock('../rfg/api', () => ({ resourceUrl: (path: string) => `/res/${path}` }));
+vi.mock('../resources/browserImageRenderer', () => ({ loadBoundedSource: vi.fn(async () => new Blob(['source'])), assertDecodedLimits: vi.fn() }));
 vi.mock('../state/AppState', () => ({
   useAppState: () => ({ notify: vi.fn(), showError: vi.fn() }),
 }));
@@ -89,9 +90,10 @@ beforeEach(() => {
   localStorage.clear();
   pixels = pixelData(() => [255, 0, 0]);
   vi.stubGlobal('Image', TestImage);
+  vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:source'), revokeObjectURL: vi.fn() });
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(context as unknown as CanvasRenderingContext2D);
-  mocks.updateFlight.mockResolvedValue({ flight: flight() });
-  mocks.listFlights.mockResolvedValue({ flights: [] });
+  mocks.flights = [];
+  mocks.updateFlight.mockReturnValue(flight());
 });
 
 afterEach(() => {
@@ -166,9 +168,7 @@ describe('ElectronicBoardingPassStudio', () => {
       ELECTRONIC_CROP_PRESETS_STORAGE_KEY,
       JSON.stringify([{ name: 'Old browser preset', crop: { centerX: 1, centerY: 1, width: 1, height: 1 } }]),
     );
-    mocks.listFlights.mockResolvedValue({
-      flights: [flight({ schemaVersion: 1, extraction: { crop: { centerX: 120, centerY: 60, width: 80, height: 40, mirrorAcrossImageCenterX: false }, presetName: 'Seat' } })],
-    });
+    mocks.flights = [flight({ schemaVersion: 1, extraction: { crop: { centerX: 120, centerY: 60, width: 80, height: 40, mirrorAcrossImageCenterX: false }, presetName: 'Seat' } })];
     renderStudio(flight());
     await screen.findByRole('img', { name: 'Crop editor canvas' });
 

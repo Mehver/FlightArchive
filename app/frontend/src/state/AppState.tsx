@@ -2,23 +2,21 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 /**
- * Shared application state: status heartbeat, explicitly refreshed catalogs,
- * and the compatibility surface for feedback. The heartbeat observes reachability only; mutation
- * responses are authoritative and their callers refresh relevant data after
- * success. Business data is never periodically synchronized.
+ * Shared application state: status heartbeat, frontend-owned catalogs, and
+ * the compatibility surface for feedback.
  */
 
 import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
   useMemo,
   useState,
   type ReactNode,
 } from 'react';
 import { api } from '../api/client';
 import type { Catalogs } from '../api/types';
+import { BusinessDataProvider, useBusinessData } from '../domain/BusinessDataProvider';
 import { useWorkspaceHeartbeat, type ConnectivityState } from './useWorkspaceHeartbeat';
 import { FeedbackProvider, useFeedback, type FeedbackContext, type FeedbackSeverity } from '../feedback/FeedbackCenter';
 
@@ -26,46 +24,51 @@ interface AppStateValue {
   connectivity: ConnectivityState;
   recheckConnection: () => Promise<void>;
   catalogs: Catalogs | null;
-  refreshCatalogs: () => Promise<void>;
   refreshAll: () => Promise<void>;
   notify: (message: string, severity?: FeedbackSeverity, context?: FeedbackContext) => void;
   showError: (error: unknown, fallback?: string, context?: FeedbackContext) => void;
+  observedActivityRevision: string | null;
+  lastReadActivityRevision: string | null;
+  hasUnreadActivity: boolean;
+  markActivityRead: (revision: string | null) => void;
 }
 
 const AppStateContext = createContext<AppStateValue | null>(null);
 
 function AppStateProviderInner({ children }: { children: ReactNode }) {
-  const [catalogs, setCatalogs] = useState<Catalogs | null>(null);
   const { notify, showError } = useFeedback();
-  const { connectivity, recheck: recheckConnection } = useWorkspaceHeartbeat(api.status);
-
-  const refreshCatalogs = useCallback(async () => {
-    try {
-      setCatalogs(await api.getCatalogs());
-    } catch {
-      /* catalogs stay stale; status bar already signals backend issues */
-    }
+  const { data } = useBusinessData();
+  const { connectivity, status, recheck: recheckConnection } = useWorkspaceHeartbeat(api.status);
+  const [lastReadActivityRevision, setLastReadActivityRevision] = useState<string | null>(null);
+  const observedActivityRevision = status?.activityRevision ?? null;
+  const hasUnreadActivity = observedActivityRevision !== null && observedActivityRevision !== lastReadActivityRevision;
+  const markActivityRead = useCallback((revision: string | null) => {
+    setLastReadActivityRevision(revision);
   }, []);
+  const catalogs = useMemo<Catalogs | null>(() => data ? ({
+    airlines: data.airlines,
+    airports: data.airports,
+    aircraftTypes: data.aircraftTypes,
+  }) : null, [data]);
 
   const refreshAll = useCallback(async () => {
-    await Promise.all([recheckConnection(), refreshCatalogs()]);
-  }, [recheckConnection, refreshCatalogs]);
-
-  // Catalogs are loaded once for consumers; unlike the heartbeat this is not
-  // a recurring sync. Mutations retain responsibility for targeted refreshes.
-  useEffect(() => { void refreshCatalogs(); }, [refreshCatalogs]);
+    await recheckConnection();
+  }, [recheckConnection]);
 
   const value = useMemo<AppStateValue>(
     () => ({
       connectivity,
       recheckConnection,
       catalogs,
-      refreshCatalogs,
       refreshAll,
       notify,
       showError,
+      observedActivityRevision,
+      lastReadActivityRevision,
+      hasUnreadActivity,
+      markActivityRead,
     }),
-    [connectivity, recheckConnection, catalogs, refreshCatalogs, refreshAll, notify, showError],
+    [connectivity, recheckConnection, catalogs, refreshAll, notify, showError, observedActivityRevision, lastReadActivityRevision, hasUnreadActivity, markActivityRead],
   );
 
   return (
@@ -78,7 +81,11 @@ function AppStateProviderInner({ children }: { children: ReactNode }) {
 /** Includes exactly one feedback host so legacy AppState consumers and new
  * useFeedback consumers share records rather than rendering duplicate toasts. */
 export function AppStateProvider({ children }: { children: ReactNode }) {
-  return <FeedbackProvider><AppStateProviderInner>{children}</AppStateProviderInner></FeedbackProvider>;
+  return (
+    <FeedbackProvider>
+      <BusinessDataProvider><AppStateProviderInner>{children}</AppStateProviderInner></BusinessDataProvider>
+    </FeedbackProvider>
+  );
 }
 
 export function useAppState(): AppStateValue {

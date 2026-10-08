@@ -9,8 +9,9 @@ import type { WorkspaceStatus } from '../api/types';
 import { useWorkspaceHeartbeat } from './useWorkspaceHeartbeat';
 
 const workspaceStatus: WorkspaceStatus = {
-  persistence: { mode: 'local', schemaVersion: 1, writable: true, loaded: true, persistenceError: null },
-  counts: { flights: 0, airlines: 0, airports: 0, aircraftTypes: 0 },
+  persistence: { mode: 'named-json-documents', writable: true, persistenceError: null },
+  archiveState: 'ready',
+  activityRevision: null,
 };
 
 describe('useWorkspaceHeartbeat', () => {
@@ -46,7 +47,7 @@ describe('useWorkspaceHeartbeat', () => {
     act(() => { void result.current.recheck(); });
     expect(result.current.connectivity).toBe('checking');
     act(() => { void result.current.recheck(); });
-    await act(async () => { resolveOlder({ status: { ...workspaceStatus, counts: { ...workspaceStatus.counts, flights: 1 } } }); });
+    await act(async () => { resolveOlder({ status: { ...workspaceStatus, activityRevision: 'older' } }); });
     expect(result.current.connectivity).toBe('checking');
     await act(async () => { resolveNewer({ status: workspaceStatus }); });
     expect(result.current).toMatchObject({ connectivity: 'online', status: workspaceStatus });

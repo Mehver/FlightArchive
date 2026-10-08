@@ -14,12 +14,10 @@ import ImageOutlinedIcon from '@mui/icons-material/ImageOutlined';
 import InsertDriveFileOutlinedIcon from '@mui/icons-material/InsertDriveFileOutlined';
 import PictureAsPdfOutlinedIcon from '@mui/icons-material/PictureAsPdfOutlined';
 import ViewListOutlinedIcon from '@mui/icons-material/ViewListOutlined';
-import type { ResourceUse } from '../api/types';
 import { EmptyState } from '../components/States';
 import { useTranslation } from '../i18n';
 import { basename, fileKind, isImageResource, isPendingInbox, parentFolder } from './resourcePaths';
 import { ResourceImage } from './ResourceImage';
-import { resourceUsageCounts, usageRoleKey } from './resourceUsage';
 import type { ResourceBrowserItem, ResourceBrowserModel, ResourceBrowserView } from './useResourceBrowser';
 
 export interface ResourceBrowserProps {
@@ -38,26 +36,13 @@ function TypeIcon({ path }: { path: string }) {
 
 function ClassificationChip({ item }: { item: ResourceBrowserItem }) {
   const { t } = useTranslation();
-  if (!item.review.present) return <Chip size="small" color="error" variant="outlined" label={t('mappingStatusMissing')} />;
+  if (!item.resource.present) return <Chip size="small" color="error" variant="outlined" label={t('mappingStatusMissing')} />;
   if (isPendingInbox(item.entry.virtual_path)) return <Chip size="small" color="warning" variant="outlined" label={t('resourcePending')} />;
-  const inUse = item.review.uses.length > 0;
-  return <Chip size="small" color={inUse ? 'primary' : 'default'} variant="outlined" label={t(inUse ? 'resourceMappedInUse' : 'resourceMapped')} />;
+  return <Chip size="small" variant="outlined" label={t('resourceMapped')} />;
 }
 
 export function ResourceBrowser({ browser, label, multiple = false }: ResourceBrowserProps) {
   const { t } = useTranslation();
-  const usageDetails = (uses: readonly ResourceUse[]) => uses.map((use, index) => {
-    const detail = use.kind === 'flight'
-      ? t('mappingUsageFlight', { flight: `${use.airlineCode}${use.flightNumber}`, date: use.departureDate, role: t(usageRoleKey(use.role)) })
-      : t('mappingUsageAirline', { code: use.code, role: t(usageRoleKey(use.role)) });
-    return <Box component="span" key={`${use.kind}-${index}`} sx={{ display: 'block' }}>{detail}</Box>;
-  });
-  const usageContext = (item: ResourceBrowserItem, noWrap = false) => {
-    const uses = item.review.uses;
-    const text = uses.length ? t('resourceUsageContext', resourceUsageCounts(uses)) : t('resourceAvailable');
-    const caption = <Typography variant="caption" color="text.secondary" noWrap={noWrap} sx={{ display: 'block' }}>{text}</Typography>;
-    return uses.length ? <Tooltip title={<Box>{usageDetails(uses)}</Box>}>{caption}</Tooltip> : caption;
-  };
   const keyDown = (event: KeyboardEvent<HTMLElement>, path: string, unavailable: boolean) => {
     if (event.target !== event.currentTarget) return;
     if (event.key === 'Enter' || event.key === ' ') {
@@ -84,7 +69,7 @@ export function ResourceBrowser({ browser, label, multiple = false }: ResourceBr
             {browser.paged.map((item) => {
               const path = item.entry.virtual_path;
               const active = browser.picked.includes(path);
-              const unavailable = !item.review.present;
+              const unavailable = !item.resource.present;
               return <Card key={path} variant="outlined" sx={{ outline: active ? 2 : 0, outlineColor: 'primary.main', position: 'relative' }}>
                 <CardActionArea aria-pressed={active} disabled={unavailable} onClick={() => browser.toggle(path, unavailable)} sx={{ p: 1 }}>
                   <Box sx={{ height: 108, display: 'grid', placeItems: 'center', color: 'text.secondary' }}>
@@ -92,7 +77,6 @@ export function ResourceBrowser({ browser, label, multiple = false }: ResourceBr
                   </Box>
                   <Typography variant="caption" noWrap sx={{ display: 'block' }}>{path}</Typography>
                   <Box sx={{ mt: 0.5 }}><ClassificationChip item={item} /></Box>
-                  {usageContext(item, true)}
                   {active ? <CheckCircleIcon color="primary" sx={{ position: 'absolute', right: 6, top: 6 }} /> : null}
                 </CardActionArea>
               </Card>;
@@ -108,13 +92,13 @@ export function ResourceBrowser({ browser, label, multiple = false }: ResourceBr
             <TableBody>{browser.paged.map((item) => {
               const path = item.entry.virtual_path;
               const active = browser.picked.includes(path);
-              const unavailable = !item.review.present;
+              const unavailable = !item.resource.present;
               return <TableRow key={path} hover selected={active} role={multiple ? 'checkbox' : 'radio'} aria-checked={active} aria-disabled={unavailable || undefined} tabIndex={unavailable ? -1 : 0} onClick={() => browser.toggle(path, unavailable)} onKeyDown={(event) => keyDown(event, path, unavailable)} sx={{ cursor: unavailable ? 'not-allowed' : 'pointer', opacity: unavailable ? 0.7 : 1, '&:focus-visible': { outline: '2px solid', outlineColor: 'primary.main', outlineOffset: -2 } }}>
                 {multiple ? <TableCell padding="checkbox"><Checkbox checked={active} size="small" disabled={unavailable} disableRipple slotProps={{ input: { readOnly: true, tabIndex: -1, 'aria-hidden': true } }} /></TableCell> : null}
                 <TableCell sx={{ maxWidth: 260 }}><Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}><TypeIcon path={path} /><Typography variant="body2" noWrap sx={{ fontWeight: active ? 650 : 400 }}>{basename(path)}</Typography></Box></TableCell>
                 <TableCell sx={{ display: { xs: 'none', sm: 'table-cell' }, maxWidth: 220 }}><Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block' }}>{parentFolder(path) || t('notAvailable')}</Typography></TableCell>
                 <TableCell sx={{ whiteSpace: 'nowrap' }}><Typography variant="caption" color="text.secondary">{fileKind(path) || t('notAvailable')}</Typography></TableCell>
-                <TableCell><ClassificationChip item={item} />{usageContext(item)}</TableCell>
+                <TableCell><ClassificationChip item={item} /></TableCell>
               </TableRow>;
             })}</TableBody>
           </Table></TableContainer>

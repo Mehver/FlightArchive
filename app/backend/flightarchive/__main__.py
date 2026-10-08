@@ -16,6 +16,8 @@ from pathlib import Path
 import uvicorn
 
 from . import APP_NAME, __version__
+from .initialization import initialize_default_v2
+from .paths import resolve_runtime_paths
 from .server import create_app, default_static_dir
 
 
@@ -42,11 +44,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="RFG data root (default: RFG_DATA_DIR or /data)",
     )
     parser.add_argument(
-        "--cache-dir",
-        type=Path,
-        help="thumbnail cache root (default: FLIGHTARCHIVE_CACHE_DIR or a 'cache' sibling of the data root)",
-    )
-    parser.add_argument(
         "--static-dir",
         type=Path,
         default=None,
@@ -59,7 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     static_dir = args.static_dir or default_static_dir()
-    app = create_app(resource_root=args.resource_root, data_root=args.data_root, static_dir=static_dir, cache_dir=args.cache_dir)
+    resource_root, data_root = resolve_runtime_paths(resource_root=args.resource_root, data_root=args.data_root)
+    initialize_default_v2(data_root)
+    app = create_app(resource_root=resource_root, data_root=data_root, static_dir=static_dir)
     url_host = "localhost" if args.host in ("127.0.0.1", "localhost", "::1") else args.host
     print(f"{APP_NAME} {__version__}")
     print(f"  API+SPA:  http://{url_host}:{args.port}/")
