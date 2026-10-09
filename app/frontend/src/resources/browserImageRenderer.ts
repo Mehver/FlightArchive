@@ -1,17 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Mehver (https://github.com/Mehver)
 // SPDX-License-Identifier: BSD-3-Clause
 
-import { thumbnailUrl } from '../rfg/api';
-import { selectThumbnailScale, type ThumbnailScale } from './thumbnailScale';
+import { resourceUrl, thumbnailUrl } from '../rfg/api';
+import { selectStudioThumbnailScale, selectThumbnailScale, THUMBNAIL_SCALES, type ThumbnailScale } from './thumbnailScale';
 
 export const MAX_SOURCE_BYTES = 24 * 1024 * 1024;
 export const MAX_DECODED_PIXELS = 40_000_000;
 export const MAX_DECODED_DIMENSION = 16_384;
 export const DEFAULT_RENDER_DIMENSION = 512;
 const MAX_THUMBNAIL_BYTES = 4 * 1024 * 1024;
-const MAX_CACHE_ENTRIES = 48;
-const MAX_CACHE_BYTES = 8 * 1024 * 1024;
-const CACHE_TTL_MS = 60_000;
 const METADATA_SCALE: ThumbnailScale = 0.015625;
 
 export interface RenderCrop {
@@ -38,9 +35,8 @@ interface RendererDependencies {
   makeCanvas(width: number, height: number): RenderCanvas;
   createObjectURL(blob: Blob): string;
   revokeObjectURL(url: string): void;
-  now(): number;
 }
-interface CacheEntry { blob: Blob; width: number; height: number; type: string; createdAt: number }
+interface RenderedBlob { blob: Blob; width: number; height: number; type: string }
 interface ThumbnailMetadata {
   sourceWidth: number;
   sourceHeight: number;
@@ -49,6 +45,14 @@ interface ThumbnailMetadata {
   thumbnailWidth: number;
   thumbnailHeight: number;
   scale: ThumbnailScale;
+}
+export interface StudioSource {
+  blob: Blob;
+  /** Absent only for bounded original formats unsupported by the raster relay (for example SVG). */
+  sourceWidth?: number;
+  sourceHeight?: number;
+  imageWidth?: number;
+  imageHeight?: number;
 }
 
 export class ResourceFetchError extends Error {
@@ -157,7 +161,7 @@ async function boundedBlob(response: Response, limit: number, signal?: AbortSign
   return new Blob(chunks, { type: response.headers.get('Content-Type') ?? 'application/octet-stream' });
 }
 
-/** Full originals are intentionally available only to explicit studio editing. */
+/** Bounded originals remain available only for Studio formats the raster relay cannot decode. */
 export async function loadBoundedSource(url: string, signal?: AbortSignal, fetcher: typeof fetch = fetch): Promise<Blob> {
   const head = await fetchResource(fetcher, url, { method: 'HEAD', signal }, signal); assertOk(head);
   const length = contentLength(head); if (length !== null && length > MAX_SOURCE_BYTES) throw new Error('source-too-large');
@@ -183,7 +187,7 @@ function defaultCanvas(width: number, height: number): RenderCanvas {
   const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height; const context = canvas.getContext('2d'); if (!context) throw new Error('canvas-2d-unavailable');
   return { width, height, context, toBlob: () => new Promise<Blob>((resolve, reject) => { const png = () => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('canvas-encode-failed')), 'image/png'); try { canvas.toBlob((blob) => blob ? resolve(blob) : png(), 'image/webp', 0.86); } catch { png(); } }) };
 }
-const defaults: RendererDependencies = { fetcher: (...args) => fetch(...args), decode: defaultDecode, makeCanvas: defaultCanvas, createObjectURL: (blob) => URL.createObjectURL(blob), revokeObjectURL: (url) => URL.revokeObjectURL(url), now: () => Date.now() };
+const defaults: RendererDependencies = { fetcher: (...args) => fetch(...args), decode: defaultDecode, makeCanvas: defaultCanvas, createObjectURL: (blob) => URL.createObjectURL(blob), revokeObjectURL: (url) => URL.revokeObjectURL(url) };
 function positiveInteger(headers: Headers, name: string): number {
   const raw = headers.get(name); const value = raw === null ? NaN : Number(raw);
   if (!Number.isSafeInteger(value) || value <= 0 || String(value) !== raw?.trim()) throw new Error('invalid-thumbnail-metadata');
@@ -202,38 +206,63 @@ function metadata(response: Response, expectedScale: ThumbnailScale): ThumbnailM
   return { sourceWidth, sourceHeight, sourceBytes, sourceEtag, thumbnailWidth, thumbnailHeight, scale };
 }
 
+/**
+ * Load a Studio editing bitmap without decoding an unbounded original raster.
+ * Relay metadata supplies the canonical EXIF-normalized source coordinate
+ * system; SVG and other relay-unsupported formats retain the old bounded
+ * original path so existing Studio compatibility is not silently removed.
+ */
+export async function loadStudioSource(virtualPath: string, signal?: AbortSignal, fetcher: typeof fetch = fetch): Promise<StudioSource> {
+  const preflight = await fetchResource(fetcher, thumbnailUrl(virtualPath, METADATA_SCALE), { method: 'HEAD', signal }, signal);
+  if (preflight.status === 415) return { blob: await loadBoundedSource(resourceUrl(virtualPath), signal, fetcher) };
+  const source = metadata(preflight, METADATA_SCALE);
+  const firstScale = selectStudioThumbnailScale(source);
+  const firstIndex = THUMBNAIL_SCALES.indexOf(firstScale);
+  for (let index = firstIndex; index < THUMBNAIL_SCALES.length; index += 1) {
+    const scale = THUMBNAIL_SCALES[index];
+    const response = await fetchResource(fetcher, thumbnailUrl(virtualPath, scale), { method: 'GET', signal }, signal);
+    if (signal?.aborted) throw aborted();
+    if (response.status === 413 && index + 1 < THUMBNAIL_SCALES.length) {
+      let code: unknown;
+      try { code = ((await response.clone().json()) as { error?: { code?: unknown } }).error?.code; } catch { /* A non-JSON 413 is not a retryable relay output error. */ }
+      if (signal?.aborted) throw aborted();
+      if (code === 'thumbnail-output-too-large') continue;
+    }
+    const actual = metadata(response, scale);
+    if (actual.sourceWidth !== source.sourceWidth || actual.sourceHeight !== source.sourceHeight
+      || actual.sourceBytes !== source.sourceBytes || actual.sourceEtag !== source.sourceEtag) throw new Error('thumbnail-source-changed');
+    return {
+      blob: await boundedBlob(response, MAX_THUMBNAIL_BYTES, signal),
+      sourceWidth: source.sourceWidth,
+      sourceHeight: source.sourceHeight,
+      imageWidth: actual.thumbnailWidth,
+      imageHeight: actual.thumbnailHeight,
+    };
+  }
+  throw new Error('unreachable-studio-thumbnail-scale');
+}
+
 export class BrowserImageRenderer {
   private readonly dependencies: RendererDependencies;
-  private readonly cache = new Map<string, CacheEntry>();
   private readonly issuedUrls = new Set<string>();
-  private cacheBytes = 0;
-  private expiryTimer: ReturnType<typeof setTimeout> | null = null;
   constructor(dependencies: Partial<RendererDependencies> = {}) { this.dependencies = { ...defaults, ...dependencies }; }
 
   async render(request: RenderRequest): Promise<RenderedImage> {
     const maxDimension = request.maxDimension ?? DEFAULT_RENDER_DIMENSION;
     if (!finitePositive(maxDimension)) throw new Error('invalid-max-dimension');
-    if (request.signal?.aborted) throw aborted(); this.pruneExpired();
+    if (request.signal?.aborted) throw aborted();
     const preflight = await fetchResource(this.dependencies.fetcher, thumbnailUrl(request.virtualPath, METADATA_SCALE), { method: 'HEAD', signal: request.signal }, request.signal);
     const source = metadata(preflight, METADATA_SCALE); if (request.signal?.aborted) throw aborted();
     if (request.crop && !validateRenderBounds(request.crop, source.sourceWidth, source.sourceHeight)) throw new Error('invalid-crop-rectangle');
     const scale = selectThumbnailScale({ sourceWidth: source.sourceWidth, sourceHeight: source.sourceHeight, sourceBytes: source.sourceBytes, crop: request.crop, maxDimension });
-    const geometry = request.crop ? [request.crop.centerX, request.crop.centerY, request.crop.width, request.crop.height, request.crop.rotationDegrees].join(',') : 'full';
-    const key = `${request.virtualPath}\0${source.sourceEtag}\0${scale}\0${geometry}\0${maxDimension}`;
-    this.removeStalePathEntries(request.virtualPath, source.sourceEtag);
-    const cached = this.cache.get(key);
-    if (cached && this.dependencies.now() - cached.createdAt <= CACHE_TTL_MS) { this.touch(key, cached); return this.issue(cached); }
-    if (cached) this.removeEntry(key, cached);
     const result = await this.renderFresh(request.virtualPath, source, scale, request.crop, maxDimension, request.signal);
     if (request.signal?.aborted) throw aborted();
-    const previous = this.cache.get(key);
-    if (previous) { this.touch(key, previous); return this.issue(previous); }
-    const entry: CacheEntry = { ...result, createdAt: this.dependencies.now() }; this.cache.set(key, entry); this.cacheBytes += entry.blob.size; this.trim(); this.scheduleExpiry(); return this.issue(entry);
+    return this.issue(result);
   }
   release(result: RenderedImage): void { if (this.issuedUrls.delete(result.url)) this.dependencies.revokeObjectURL(result.url); }
-  dispose(): void { for (const url of this.issuedUrls) this.dependencies.revokeObjectURL(url); this.issuedUrls.clear(); this.cache.clear(); this.cacheBytes = 0; if (this.expiryTimer !== null) clearTimeout(this.expiryTimer); this.expiryTimer = null; }
+  dispose(): void { for (const url of this.issuedUrls) this.dependencies.revokeObjectURL(url); this.issuedUrls.clear(); }
 
-  private async renderFresh(path: string, source: ThumbnailMetadata, scale: ThumbnailScale, crop: RenderCrop | undefined, maxDimension: number, signal?: AbortSignal): Promise<Omit<CacheEntry, 'createdAt'>> {
+  private async renderFresh(path: string, source: ThumbnailMetadata, scale: ThumbnailScale, crop: RenderCrop | undefined, maxDimension: number, signal?: AbortSignal): Promise<RenderedBlob> {
     const response = await fetchResource(this.dependencies.fetcher, thumbnailUrl(path, scale), { method: 'GET', signal }, signal);
     const actual = metadata(response, scale);
     if (actual.sourceWidth !== source.sourceWidth || actual.sourceHeight !== source.sourceHeight || actual.sourceBytes !== source.sourceBytes || actual.sourceEtag !== source.sourceEtag) throw new Error('thumbnail-source-changed');
@@ -256,12 +285,6 @@ export class BrowserImageRenderer {
       return { blob: output, width, height, type: output.type };
     } finally { decoded.close(); }
   }
-  private touch(key: string, entry: CacheEntry): void { this.cache.delete(key); this.cache.set(key, entry); }
-  private removeStalePathEntries(path: string, identity: string): void { const prefix = `${path}\0`; const current = `${prefix}${identity}\0`; for (const [key, entry] of this.cache) if (key.startsWith(prefix) && !key.startsWith(current)) this.removeEntry(key, entry); }
-  private trim(): void { while (this.cache.size > MAX_CACHE_ENTRIES || this.cacheBytes > MAX_CACHE_BYTES) { const key = this.cache.keys().next().value as string; this.removeEntry(key, this.cache.get(key)!); } }
-  private removeEntry(key: string, entry: CacheEntry): void { this.cache.delete(key); this.cacheBytes -= entry.blob.size; }
-  private pruneExpired(): void { const now = this.dependencies.now(); for (const [key, entry] of this.cache) if (now - entry.createdAt >= CACHE_TTL_MS) this.removeEntry(key, entry); this.scheduleExpiry(); }
-  private scheduleExpiry(): void { if (this.expiryTimer !== null) clearTimeout(this.expiryTimer); this.expiryTimer = null; let expiresAt = Infinity; for (const entry of this.cache.values()) expiresAt = Math.min(expiresAt, entry.createdAt + CACHE_TTL_MS); if (!Number.isFinite(expiresAt)) return; this.expiryTimer = setTimeout(() => { this.expiryTimer = null; this.pruneExpired(); }, Math.max(0, expiresAt - this.dependencies.now())); }
-  private issue(entry: Pick<CacheEntry, 'blob' | 'width' | 'height' | 'type'>): RenderedImage { const url = this.dependencies.createObjectURL(entry.blob); this.issuedUrls.add(url); return { url, width: entry.width, height: entry.height, type: entry.type }; }
+  private issue(entry: RenderedBlob): RenderedImage { const url = this.dependencies.createObjectURL(entry.blob); this.issuedUrls.add(url); return { url, width: entry.width, height: entry.height, type: entry.type }; }
 }
 export const browserImageRenderer = new BrowserImageRenderer();

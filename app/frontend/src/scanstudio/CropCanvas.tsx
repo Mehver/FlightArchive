@@ -28,6 +28,8 @@ export type CropCanvasMode = 'rotatable' | 'axis-aligned';
 
 export interface CropCanvasProps {
   image: HTMLImageElement | null;
+  /** Canonical source bounds when `image` is a rounded relay thumbnail. */
+  sourceBounds?: QuadBounds;
   crop: CropRect;
   mode: CropCanvasMode;
   zoom: number;
@@ -40,6 +42,19 @@ export interface CropCanvasProps {
    * workspace. The canvas backing store remains independent of its CSS size.
    */
   fitToContainer?: boolean;
+}
+
+export function imageSampleRect(
+  logical: { x: number; y: number; width: number; height: number },
+  sourceBounds: QuadBounds,
+  imageBounds: QuadBounds,
+) {
+  return {
+    x: logical.x * imageBounds.width / sourceBounds.width,
+    y: logical.y * imageBounds.height / sourceBounds.height,
+    width: logical.width * imageBounds.width / sourceBounds.width,
+    height: logical.height * imageBounds.height / sourceBounds.height,
+  };
 }
 
 const CORNER_HIT_PX = 12;
@@ -160,7 +175,7 @@ function cursorFor(hit: Hit | null, quad: Quad): string {
 }
 
 /** Controlled source-image crop editor with a floating pixel magnifier. */
-export function CropCanvas({ image, crop, mode, zoom, magnification, onCropChange, magnifierEnabled = true, fitToContainer = false }: CropCanvasProps) {
+export function CropCanvas({ image, sourceBounds, crop, mode, zoom, magnification, onCropChange, magnifierEnabled = true, fitToContainer = false }: CropCanvasProps) {
   const { t } = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const magnifierRef = useRef<HTMLCanvasElement>(null);
@@ -171,22 +186,22 @@ export function CropCanvas({ image, crop, mode, zoom, magnification, onCropChang
   /** Cursor position relative to the container, used to float the magnifier. */
   const [cursorCss, setCursorCss] = useState<{ x: number; y: number } | null>(null);
   const quad = useMemo(() => rectToQuad(mode === 'axis-aligned' ? { ...crop, rotationDegrees: 0 } : crop), [crop, mode]);
-  const bounds: QuadBounds | null = image ? { width: image.naturalWidth, height: image.naturalHeight } : null;
+  const bounds: QuadBounds | null = image ? (sourceBounds ?? { width: image.naturalWidth, height: image.naturalHeight }) : null;
   const fittedGeometry = useMemo(() => {
     if (!image || !fitToContainer || !workspace) return null;
     const controlInset = mode === 'rotatable'
-      ? rotationControlInsetForCrop(image.naturalWidth, image.naturalHeight, workspace.width, workspace.height, crop)
+      ? rotationControlInsetForCrop(bounds!.width, bounds!.height, workspace.width, workspace.height, crop)
       : 0;
     return containCanvasGeometry(
-      image.naturalWidth,
-      image.naturalHeight,
+      bounds!.width,
+      bounds!.height,
       workspace.width,
       workspace.height,
       window.devicePixelRatio,
       controlInset,
     );
-  }, [crop, fitToContainer, image, mode, workspace]);
-  const scale = image ? (fittedGeometry?.backingScale ?? Math.min(1, 760 / image.naturalWidth) * zoom) : 1;
+  }, [bounds, crop, fitToContainer, image, mode, workspace]);
+  const scale = bounds ? (fittedGeometry?.backingScale ?? Math.min(1, 760 / bounds.width) * zoom) : 1;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -204,13 +219,13 @@ export function CropCanvas({ image, crop, mode, zoom, magnification, onCropChang
   const toCanvas = useCallback((point: Point) => {
     const canvas = canvasRef.current;
     if (!image || !canvas) return point;
-    return { x: (point.x - image.naturalWidth / 2) * scale + canvas.width / 2, y: (point.y - image.naturalHeight / 2) * scale + canvas.height / 2 };
-  }, [image, scale]);
+    return { x: (point.x - bounds!.width / 2) * scale + canvas.width / 2, y: (point.y - bounds!.height / 2) * scale + canvas.height / 2 };
+  }, [bounds, image, scale]);
   const toImage = useCallback((point: Point) => {
     const canvas = canvasRef.current;
     if (!image || !canvas) return point;
-    return { x: (point.x - canvas.width / 2) / scale + image.naturalWidth / 2, y: (point.y - canvas.height / 2) / scale + image.naturalHeight / 2 };
-  }, [image, scale]);
+    return { x: (point.x - canvas.width / 2) / scale + bounds!.width / 2, y: (point.y - canvas.height / 2) / scale + bounds!.height / 2 };
+  }, [bounds, image, scale]);
   const eventPoint = (canvas: HTMLCanvasElement, event: { clientX: number; clientY: number }) => {
     const rect = canvas.getBoundingClientRect();
     return { x: (event.clientX - rect.left) / rect.width * canvas.width, y: (event.clientY - rect.top) / rect.height * canvas.height };
@@ -225,8 +240,8 @@ export function CropCanvas({ image, crop, mode, zoom, magnification, onCropChang
     if (!canvas || !image) return;
     const context = canvas.getContext('2d');
     if (!context) return;
-    const width = image.naturalWidth * scale;
-    const height = image.naturalHeight * scale;
+    const width = bounds!.width * scale;
+    const height = bounds!.height * scale;
     canvas.width = fittedGeometry?.canvasWidth ?? Math.max(320, width + (mode === 'rotatable' ? PADDING * 2 : 0));
     canvas.height = fittedGeometry?.canvasHeight ?? Math.max(200, height + (mode === 'rotatable' ? PADDING * 2 : 0));
     context.clearRect(0, 0, canvas.width, canvas.height);
@@ -248,7 +263,7 @@ export function CropCanvas({ image, crop, mode, zoom, magnification, onCropChang
     }
     const controlScale = fittedGeometry && workspace ? fittedGeometry.canvasWidth / workspace.width : 1;
     ['#f44336', '#00bcd4', '#ff9800', '#e040fb'].forEach((color, index) => { const p = points[index]; context.beginPath(); context.arc(p.x, p.y, 6 * controlScale, 0, Math.PI * 2); context.fillStyle = color; context.fill(); context.strokeStyle = '#fff'; context.stroke(); });
-  }, [fittedGeometry, image, mode, quad, scale, toCanvas]);
+  }, [bounds, fittedGeometry, image, mode, quad, scale, toCanvas]);
 
   /** Render the floating magnifier content (source pixels + bold crop overlay). */
   useEffect(() => {
@@ -257,12 +272,13 @@ export function CropCanvas({ image, crop, mode, zoom, magnification, onCropChang
     const context = canvas.getContext('2d');
     if (!context || !image || !pointer) { context?.clearRect(0, 0, canvas.width, canvas.height); return; }
     canvas.width = MAGNIFIER_BACKING; canvas.height = MAGNIFIER_BACKING;
-    const sourceSize = Math.min(canvas.width / magnification, image.naturalWidth, image.naturalHeight);
-    const sx = clamp(pointer.x - sourceSize / 2, 0, Math.max(0, image.naturalWidth - sourceSize));
-    const sy = clamp(pointer.y - sourceSize / 2, 0, Math.max(0, image.naturalHeight - sourceSize));
+    const sourceSize = Math.min(canvas.width / magnification, bounds!.width, bounds!.height);
+    const sx = clamp(pointer.x - sourceSize / 2, 0, Math.max(0, bounds!.width - sourceSize));
+    const sy = clamp(pointer.y - sourceSize / 2, 0, Math.max(0, bounds!.height - sourceSize));
     const m = canvas.width / sourceSize;
     context.imageSmoothingEnabled = false;
-    context.drawImage(image, sx, sy, sourceSize, sourceSize, 0, 0, canvas.width, canvas.height);
+    const sample = imageSampleRect({ x: sx, y: sy, width: sourceSize, height: sourceSize }, bounds!, { width: image.naturalWidth, height: image.naturalHeight });
+    context.drawImage(image, sample.x, sample.y, sample.width, sample.height, 0, 0, canvas.width, canvas.height);
     const points = quad.map(p => ({ x: (p.x - sx) * m, y: (p.y - sy) * m }));
     context.beginPath(); points.forEach((p, i) => i ? context.lineTo(p.x, p.y) : context.moveTo(p.x, p.y)); context.closePath();
     context.strokeStyle = '#ffeb3b'; context.lineWidth = 5; context.stroke();
@@ -272,7 +288,7 @@ export function CropCanvas({ image, crop, mode, zoom, magnification, onCropChang
       context.fillStyle = color; context.fill();
       context.strokeStyle = '#fff'; context.lineWidth = 0.8; context.stroke();
     });
-  }, [image, magnification, pointer, quad]);
+  }, [bounds, image, magnification, pointer, quad]);
 
   /** Track the cursor position relative to the container so the magnifier floats. */
   const updateCursorCss = useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {

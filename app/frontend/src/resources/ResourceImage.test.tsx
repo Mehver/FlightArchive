@@ -4,27 +4,36 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 
 vi.mock('./useBrowserImage', () => ({
   useBrowserImage: (path: string) => path.includes('broken')
     ? { status: 'failed', src: null }
     : path.includes('loading') ? { status: 'loading', src: null } : { status: 'ready', src: path.endsWith('.svg') ? `/res/${path}` : `blob:rendered-${path}` },
 }));
+vi.mock('../i18n', () => ({ useTranslation: () => ({ t: () => 'Loading…' }) }));
 
 import { ResourceImage } from './ResourceImage';
 
 afterEach(cleanup);
 
 describe('ResourceImage', () => {
-  it('renders browser-produced raster output rather than a server image route', () => {
+  it('shows loading until the produced raster element loads', () => {
     render(<ResourceImage resourcePath="inbox/ticket.png" alt="ticket" />);
-    expect(screen.getByAltText('ticket').getAttribute('src')).toBe('blob:rendered-inbox/ticket.png');
+    const element = screen.getByAltText('ticket');
+    expect(element.getAttribute('src')).toBe('blob:rendered-inbox/ticket.png');
+    expect(screen.getByRole('progressbar', { name: /loading/i })).toBeTruthy();
+    fireEvent.load(element);
+    expect(screen.queryByRole('progressbar', { name: /loading/i })).toBeNull();
   });
 
   it('keeps SVG resources on the direct original route', () => {
     render(<ResourceImage resourcePath="objects/logo.svg" alt="logo" />);
-    expect(screen.getByAltText('logo').getAttribute('src')).toBe('/res/objects/logo.svg');
+    const element = screen.getByAltText('logo');
+    expect(element.getAttribute('src')).toBe('/res/objects/logo.svg');
+    expect(screen.getByRole('progressbar', { name: /loading/i })).toBeTruthy();
+    fireEvent.load(element);
+    expect(screen.queryByRole('progressbar', { name: /loading/i })).toBeNull();
   });
 
   it('uses the same bounded placeholder geometry while loading and on failure', () => {

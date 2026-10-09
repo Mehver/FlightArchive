@@ -21,8 +21,8 @@
  *     a partial or torn set of scans still reads as one deliberate ticket object.
  */
 
-import { useEffect, useState } from 'react';
-import { Box, Typography } from '@mui/material';
+import { useEffect, useLayoutEffect, useState } from 'react';
+import { Box, CircularProgress, Typography } from '@mui/material';
 import ConfirmationNumberOutlinedIcon from '@mui/icons-material/ConfirmationNumberOutlined';
 import QrCode2OutlinedIcon from '@mui/icons-material/QrCode2Outlined';
 import type { FlightRecord, PaperBoardingPassLayout } from '../api/types';
@@ -63,10 +63,13 @@ function BackingSheet({
   crop?: PaperBoardingPassLayout['crop'];
   alt: string;
 }) {
+  const { t } = useTranslation();
   const visibility = useNearViewport<HTMLElement>();
   const image = useBrowserImage(resourcePath, { crop, maxDimension: 1024, enabled: visibility.enabled });
   const [elementFailed, setElementFailed] = useState(false);
+  const [elementLoaded, setElementLoaded] = useState(false);
   useEffect(() => setElementFailed(false), [resourcePath, image.src]);
+  useLayoutEffect(() => setElementLoaded(false), [resourcePath, image.src]);
   return (
     <Box
       ref={visibility.ref}
@@ -92,10 +95,12 @@ function BackingSheet({
           src={image.src}
           alt={alt}
           loading="lazy"
+          onLoad={() => setElementLoaded(true)}
           onError={() => setElementFailed(true)}
-          sx={{ width: '100%', height: '100%', objectFit: crop ? 'contain' : 'cover', display: 'block', opacity: 0.85 }}
+          sx={{ width: '100%', height: '100%', objectFit: crop ? 'contain' : 'cover', display: 'block', opacity: elementLoaded ? 0.85 : 0 }}
         />
       ) : null}
+      {resourcePath && visibility.enabled && !elementFailed && (image.status === 'loading' || image.status === 'ready' && !elementLoaded) ? <CircularProgress size={20} aria-label={t('loading')} sx={{ position: 'absolute', left: '50%', top: '50%', ml: '-10px', mt: '-10px' }} /> : null}
     </Box>
   );
 }
@@ -104,10 +109,13 @@ function BackingSheet({
  * so they deliberately show a status rather than issuing a request that cannot
  * succeed. An unprepared bound scan keeps its generic thumbnail. */
 function ElectronicMiniCard({ resourcePath, prepared, alt, savedLayoutLabel }: { resourcePath: string | null; prepared: boolean; alt: string; savedLayoutLabel: string }) {
+  const { t } = useTranslation();
   const visibility = useNearViewport<HTMLElement>();
   const image = useBrowserImage(prepared ? null : resourcePath, { enabled: visibility.enabled });
   const [elementFailed, setElementFailed] = useState(false);
+  const [elementLoaded, setElementLoaded] = useState(false);
   useEffect(() => setElementFailed(false), [resourcePath, image.src]);
+  useLayoutEffect(() => setElementLoaded(false), [resourcePath, image.src]);
   return (
     <Box
       ref={visibility.ref}
@@ -147,10 +155,12 @@ function ElectronicMiniCard({ resourcePath, prepared, alt, savedLayoutLabel }: {
               src={image.src}
               alt={alt}
               loading="lazy"
+              onLoad={() => setElementLoaded(true)}
               onError={() => setElementFailed(true)}
-              sx={{ position: 'relative', width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+              sx={{ position: 'relative', width: '100%', height: '100%', objectFit: 'cover', display: 'block', opacity: elementLoaded ? 1 : 0 }}
             />
           ) : null}
+          {resourcePath && visibility.enabled && !elementFailed && (image.status === 'loading' || image.status === 'ready' && !elementLoaded) ? <CircularProgress size={18} aria-label={t('loading')} sx={{ position: 'absolute' }} /> : null}
         </>
       )}
     </Box>

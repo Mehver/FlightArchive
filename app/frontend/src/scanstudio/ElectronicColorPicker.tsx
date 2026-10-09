@@ -10,6 +10,7 @@ import type { ElectronicCropRegion } from './electronicCropPresets';
 
 interface ElectronicColorPickerProps {
   image: HTMLImageElement;
+  sourceBounds?: { width: number; height: number };
   crop: ElectronicCropRegion;
   color: HexColor | null;
   onColorChange: (color: HexColor) => void;
@@ -35,6 +36,7 @@ const MAGNIFIER_OFFSET = 8;
  */
 export function ElectronicColorPicker({
   image,
+  sourceBounds,
   crop,
   color,
   onColorChange,
@@ -50,11 +52,14 @@ export function ElectronicColorPicker({
   const [cursorCss, setCursorCss] = useState<{ x: number; y: number } | null>(null);
   /** Image-space coordinate under the cursor. */
   const [imagePointer, setImagePointer] = useState<{ x: number; y: number } | null>(null);
+  const logicalBounds = sourceBounds ?? { width: image.naturalWidth, height: image.naturalHeight };
+  const scaleX = image.naturalWidth / logicalBounds.width;
+  const scaleY = image.naturalHeight / logicalBounds.height;
   const pixelCrop: PixelRect = {
-    x: crop.centerX - crop.width / 2,
-    y: crop.centerY - crop.height / 2,
-    width: crop.width,
-    height: crop.height,
+    x: (crop.centerX - crop.width / 2) * scaleX,
+    y: (crop.centerY - crop.height / 2) * scaleY,
+    width: crop.width * scaleX,
+    height: crop.height * scaleY,
   };
 
   useEffect(() => {

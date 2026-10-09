@@ -21,8 +21,7 @@ import {
   Typography,
 } from '@mui/material';
 import { useBusinessData } from '../domain/BusinessDataProvider';
-import { resourceUrl } from '../rfg/api';
-import { assertDecodedLimits, loadBoundedSource } from '../resources/browserImageRenderer';
+import { assertDecodedLimits, loadStudioSource, type StudioSource } from '../resources/browserImageRenderer';
 import { useTranslation } from '../i18n';
 import { useAppState } from '../state/AppState';
 import { isValidHexColor, type HexColor } from '../theme/colors';
@@ -65,6 +64,7 @@ export function ElectronicBoardingPassStudio({ open, flight, onSaved, onClose }:
 
   const [stage, setStage] = useState<Stage>('crop');
   const [image, setImage] = useState<HTMLImageElement | null>(null);
+  const [sourceBounds, setSourceBounds] = useState<{ width: number; height: number } | null>(null);
   const [imageError, setImageError] = useState(false);
   const [magnification, setMagnification] = useState(2);
   const [magnifierEnabled, setMagnifierEnabled] = useState(true);
@@ -88,7 +88,7 @@ export function ElectronicBoardingPassStudio({ open, flight, onSaved, onClose }:
    */
   const initialCropRestoredRef = useRef(false);
 
-  const imageBounds = image ? { width: image.naturalWidth, height: image.naturalHeight } : null;
+  const imageBounds = sourceBounds;
   const cropUsable = crop.width > 0 && crop.height > 0;
 
   // The dialog is mounted per editing session; load the bound image once it
@@ -99,17 +99,25 @@ export function ElectronicBoardingPassStudio({ open, flight, onSaved, onClose }:
     if (!open || !resourcePath) return;
     initialCropRestoredRef.current = false;
     setImage(null);
+    setSourceBounds(null);
     setImageError(false);
     let cancelled = false;
     const controller = new AbortController();
     let sourceUrl: string | null = null;
+    let loadedSource: StudioSource | null = null;
     const element = new Image();
     element.crossOrigin = 'anonymous';
     element.onload = () => {
       if (cancelled) return;
-      try { assertDecodedLimits(element.naturalWidth, element.naturalHeight); } catch { setImageError(true); return; }
+      const bounds = loadedSource?.sourceWidth && loadedSource.sourceHeight
+        ? { width: loadedSource.sourceWidth, height: loadedSource.sourceHeight }
+        : { width: element.naturalWidth, height: element.naturalHeight };
+      try {
+        assertDecodedLimits(element.naturalWidth, element.naturalHeight);
+        if (loadedSource?.imageWidth && (element.naturalWidth !== loadedSource.imageWidth || element.naturalHeight !== loadedSource.imageHeight)) throw new Error('thumbnail-dimensions-mismatch');
+      } catch { setImageError(true); return; }
       setImage(element);
-      const bounds = { width: element.naturalWidth, height: element.naturalHeight };
+      setSourceBounds(bounds);
       const local = loadElectronicLastCrop();
       const preferred = local?.crop ?? savedCrop;
       const preferredMirror = local?.mirrorAcrossImageCenterX ?? savedCrop?.mirrorAcrossImageCenterX ?? false;
@@ -126,9 +134,10 @@ export function ElectronicBoardingPassStudio({ open, flight, onSaved, onClose }:
     element.onerror = () => {
       if (!cancelled) setImageError(true);
     };
-    void loadBoundedSource(resourceUrl(resourcePath), controller.signal).then((blob) => {
+    void loadStudioSource(resourcePath, controller.signal).then((source) => {
       if (cancelled) return;
-      sourceUrl = URL.createObjectURL(blob);
+      loadedSource = source;
+      sourceUrl = URL.createObjectURL(source.blob);
       element.src = sourceUrl;
     }, (reason: unknown) => {
       if (!cancelled && !(reason instanceof DOMException && reason.name === 'AbortError')) setImageError(true);
@@ -193,7 +202,7 @@ export function ElectronicBoardingPassStudio({ open, flight, onSaved, onClose }:
   // drawImage is sufficient.
   useEffect(() => {
     const canvas = cropPreviewRef.current;
-    if (!canvas || !image || !cropUsable) return;
+    if (!canvas || !image || !imageBounds || !cropUsable) return;
     const context = canvas.getContext('2d');
     if (!context) return;
     const sourceX = crop.centerX - crop.width / 2;
@@ -206,16 +215,16 @@ export function ElectronicBoardingPassStudio({ open, flight, onSaved, onClose }:
     canvas.height = displayHeight;
     context.drawImage(
       image,
-      sourceX,
-      sourceY,
-      crop.width,
-      crop.height,
+      sourceX * image.naturalWidth / imageBounds.width,
+      sourceY * image.naturalHeight / imageBounds.height,
+      crop.width * image.naturalWidth / imageBounds.width,
+      crop.height * image.naturalHeight / imageBounds.height,
       0,
       0,
       displayWidth,
       displayHeight,
     );
-  }, [image, crop, cropUsable]);
+  }, [image, imageBounds, crop, cropUsable]);
 
   const save = async () => {
     if (!imageBounds || !cropUsable) return;
@@ -269,6 +278,7 @@ export function ElectronicBoardingPassStudio({ open, flight, onSaved, onClose }:
                 <Box sx={{ flex: '1 1 0', height: { xs: 300, sm: 'auto' }, minHeight: { sm: 0 }, minWidth: 0, position: 'relative' }}>
                   <CropCanvas
                     image={image}
+                    sourceBounds={imageBounds ?? undefined}
                     crop={{ ...crop, rotationDegrees: 0 }}
                     mode="axis-aligned"
                     zoom={1}
@@ -357,6 +367,7 @@ export function ElectronicBoardingPassStudio({ open, flight, onSaved, onClose }:
               <Box sx={{ flex: '1 1 auto', maxWidth: '100%', position: 'relative', overflow: 'auto', minHeight: 0 }}>
                 <ElectronicColorPicker
                   image={image}
+                  sourceBounds={imageBounds ?? undefined}
                   crop={crop}
                   color={boardingPassColor}
                   onColorChange={setBoardingPassColor}

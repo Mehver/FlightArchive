@@ -1,16 +1,22 @@
 // SPDX-FileCopyrightText: 2026 Mehver (https://github.com/Mehver)
 // SPDX-License-Identifier: BSD-3-Clause
 
-import { useEffect, useMemo, useState } from 'react';
-import { Box, useTheme } from '@mui/material';
+import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
+import { Box, CircularProgress, useTheme } from '@mui/material';
 import { useBrowserImage } from '../resources/useBrowserImage';
 import { useNearViewport } from '../resources/useNearViewport';
+import { useTranslation } from '../i18n';
 
 function LogoImage({ resourcePath, alt, eager = false, enabled = true, onFailure, sx }: { resourcePath: string; alt: string; eager?: boolean; enabled?: boolean; onFailure(): void; sx: object }) {
+  const { t } = useTranslation();
   const image = useBrowserImage(resourcePath, { maxDimension: 512, enabled });
+  const [elementLoaded, setElementLoaded] = useState(false);
+  useLayoutEffect(() => setElementLoaded(false), [resourcePath, image.src]);
   useEffect(() => { if (image.status === 'failed') onFailure(); }, [image.status, onFailure]);
-  if (image.status !== 'ready') return null;
-  return <Box component="img" src={image.src} alt={alt} aria-hidden={alt ? undefined : true} loading={eager ? 'eager' : 'lazy'} onError={onFailure} sx={sx} />;
+  return <>
+    {image.status === 'ready' ? <Box component="img" src={image.src} alt={alt} aria-hidden={alt ? undefined : true} loading={eager ? 'eager' : 'lazy'} onLoad={() => setElementLoaded(true)} onError={onFailure} sx={{ ...sx, opacity: elementLoaded ? 1 : 0 }} /> : null}
+    {enabled && (image.status === 'loading' || image.status === 'ready' && !elementLoaded) ? <Box data-testid="airline-logo-loading" sx={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', pointerEvents: 'none' }}><CircularProgress size={18} aria-label={t('loading')} /></Box> : null}
+  </>;
 }
 
 /** A symbol mark is always fitted inside a square, including when its host is round. */
@@ -38,7 +44,7 @@ export function AirlineLogo({
       ref={visibility.ref}
       role="img"
       aria-label={label}
-      sx={{ width, height, flex: '0 0 auto', display: 'grid', placeItems: 'center', overflow: 'hidden' }}
+      sx={{ position: 'relative', width, height, flex: '0 0 auto', display: 'grid', placeItems: 'center', overflow: 'hidden' }}
     >
       {hasSymbol ? (
         <LogoImage
@@ -95,6 +101,7 @@ export function AirlineHorizontalLogo({
         height: maxHeight,
         maxWidth: '100%',
         maxHeight: '100%',
+        position: 'relative',
         display: 'grid',
         placeItems: 'center',
         visibility: resourcePath ? 'visible' : 'hidden',

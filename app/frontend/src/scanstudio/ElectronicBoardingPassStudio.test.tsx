@@ -12,6 +12,7 @@ import { ELECTRONIC_CROP_PRESETS_STORAGE_KEY } from './electronicCropPresets';
 
 const mocks = vi.hoisted(() => ({
   updateFlight: vi.fn(),
+  loadStudioSource: vi.fn(),
   flights: [] as FlightRecord[],
 }));
 
@@ -19,7 +20,7 @@ vi.mock('../domain/BusinessDataProvider', () => ({
   useBusinessData: () => ({ data: { flights: mocks.flights }, updateFlight: mocks.updateFlight, saveDocument: vi.fn().mockResolvedValue({ ok: true }) }),
 }));
 vi.mock('../rfg/api', () => ({ resourceUrl: (path: string) => `/res/${path}` }));
-vi.mock('../resources/browserImageRenderer', () => ({ loadBoundedSource: vi.fn(async () => new Blob(['source'])), assertDecodedLimits: vi.fn() }));
+vi.mock('../resources/browserImageRenderer', () => ({ loadStudioSource: mocks.loadStudioSource, assertDecodedLimits: vi.fn() }));
 vi.mock('../state/AppState', () => ({
   useAppState: () => ({ notify: vi.fn(), showError: vi.fn() }),
 }));
@@ -93,6 +94,7 @@ beforeEach(() => {
   vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:source'), revokeObjectURL: vi.fn() });
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(context as unknown as CanvasRenderingContext2D);
   mocks.flights = [];
+  mocks.loadStudioSource.mockResolvedValue({ blob: new Blob(['source']), sourceWidth: imageSize.width, sourceHeight: imageSize.height, imageWidth: imageSize.width, imageHeight: imageSize.height });
   mocks.updateFlight.mockReturnValue(flight());
 });
 
@@ -222,5 +224,27 @@ describe('ElectronicBoardingPassStudio', () => {
 
     const colorGroup = await screen.findByRole('group', { name: 'Boarding Pass Color' });
     await waitFor(() => expect((within(colorGroup).getByRole('textbox') as HTMLInputElement).value).toBe('C80A0A'));
+  });
+
+  it('restores and saves canonical original coordinates while editing a rounded relay thumbnail', async () => {
+    imageSize.width = 1750;
+    imageSize.height = 1250;
+    mocks.loadStudioSource.mockResolvedValue({ blob: new Blob(['thumbnail']), sourceWidth: 14_001, sourceHeight: 10_001, imageWidth: 1750, imageHeight: 1250 });
+    renderStudio(flight({
+      schemaVersion: 1,
+      extraction: { crop: { centerX: 7000.5, centerY: 5000.5, width: 1400.1, height: 1000.1, mirrorAcrossImageCenterX: false }, presetName: 'Large' },
+    }, '#010203'));
+    await screen.findByRole('img', { name: 'Crop editor canvas' });
+
+    expect(numberField('Center X').value).toBe('7000.5');
+    expect(numberField('Width').value).toBe('1400.1');
+    fireEvent.click(screen.getByRole('button', { name: /next.*colors/i }));
+    fireEvent.click(screen.getByRole('button', { name: /save layout/i }));
+
+    await waitFor(() => expect(mocks.updateFlight).toHaveBeenCalledOnce());
+    expect(mocks.updateFlight.mock.calls[0][1].electronicBoardingPass.extraction.crop).toEqual({
+      centerX: 7000.5, centerY: 5000.5, width: 1400.1, height: 1000.1, mirrorAcrossImageCenterX: false,
+    });
+    expect(mocks.updateFlight.mock.calls[0][1].boardingPassColor).toBe('#010203');
   });
 });

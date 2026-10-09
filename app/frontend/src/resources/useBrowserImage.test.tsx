@@ -10,8 +10,8 @@ vi.mock('./browserImageRenderer', async (original) => ({ ...await original<typeo
 import { useBrowserImage } from './useBrowserImage';
 import { useNearViewport } from './useNearViewport';
 
-function Probe({ path, enabled = true }: { path: string; enabled?: boolean }) {
-  const image = useBrowserImage(path, { crop: { centerX: 10, centerY: 10, width: 10, height: 10, rotationDegrees: 0 }, enabled });
+function Probe({ path, enabled = true, centerX = 10 }: { path: string; enabled?: boolean; centerX?: number }) {
+  const image = useBrowserImage(path, { crop: { centerX, centerY: 10, width: 10, height: 10, rotationDegrees: 0 }, enabled });
   return <output data-error={image.status === 'failed' ? String(image.error) : ''}>{image.src ?? image.status}</output>;
 }
 afterEach(() => { cleanup(); mocks.render.mockReset(); mocks.release.mockReset(); vi.unstubAllGlobals(); });
@@ -36,19 +36,21 @@ describe('useBrowserImage', () => {
     expect(mocks.render).not.toHaveBeenCalled();
   });
 
-  it('releases a ready raster URL when it becomes disabled offscreen', async () => {
-    mocks.render.mockResolvedValue({ url: 'blob:owned', width: 1, height: 1, type: 'image/webp' });
-    const view = render(<Probe path="objects/scan.jpg" />); await waitFor(() => expect(screen.getByText('blob:owned')).toBeTruthy());
-    view.rerender(<Probe path="objects/scan.jpg" enabled={false} />);
-    expect(mocks.release).toHaveBeenCalledWith(expect.objectContaining({ url: 'blob:owned' }));
-  });
-
   it('releases a late result after a path change', async () => {
     let finish!: (value: { url: string; width: number; height: number; type: string }) => void;
     mocks.render.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; })).mockResolvedValueOnce({ url: 'blob:new', width: 1, height: 1, type: 'image/webp' });
     const view = render(<Probe path="old.jpg" />); view.rerender(<Probe path="new.jpg" />);
     await waitFor(() => expect(screen.getByText('blob:new')).toBeTruthy()); await act(async () => finish({ url: 'blob:stale', width: 1, height: 1, type: 'image/webp' }));
     expect(mocks.release).toHaveBeenCalledWith(expect.objectContaining({ url: 'blob:stale' }));
+  });
+
+  it('releases the held URL and rerenders when crop geometry changes', async () => {
+    mocks.render.mockResolvedValueOnce({ url: 'blob:first-crop', width: 1, height: 1, type: 'image/webp' }).mockResolvedValueOnce({ url: 'blob:second-crop', width: 1, height: 1, type: 'image/webp' });
+    const view = render(<Probe path="crop.jpg" />);
+    await waitFor(() => expect(screen.getByText('blob:first-crop')).toBeTruthy());
+    view.rerender(<Probe path="crop.jpg" centerX={12} />);
+    await waitFor(() => expect(screen.getByText('blob:second-crop')).toBeTruthy());
+    expect(mocks.release).toHaveBeenCalledWith(expect.objectContaining({ url: 'blob:first-crop' }));
   });
 
   it('survives StrictMode cancellation and releases both consumer URLs', async () => {
@@ -69,5 +71,22 @@ describe('near-viewport request gate', () => {
     await waitFor(() => expect(callbacks).toHaveLength(92)); expect(mocks.render).not.toHaveBeenCalled();
     await act(async () => callbacks[0]([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver));
     await waitFor(() => expect(mocks.render).toHaveBeenCalledOnce());
+  });
+
+  it('stays enabled after first intersection so exit and re-entry do not rerender or release', async () => {
+    let callback!: IntersectionObserverCallback;
+    class Observer { constructor(next: IntersectionObserverCallback) { callback = next; } observe() {} disconnect() {} unobserve() {} takeRecords() { return []; } root = null; rootMargin = '250px 0px'; thresholds = [0]; }
+    vi.stubGlobal('IntersectionObserver', Observer);
+    mocks.render.mockResolvedValue({ url: 'blob:sticky', width: 1, height: 1, type: 'image/webp' });
+    function Lazy() { const visibility = useNearViewport<HTMLDivElement>(); const image = useBrowserImage('sticky.jpg', { enabled: visibility.enabled }); return <div ref={visibility.ref}>{image.src ?? image.status}</div>; }
+    const view = render(<Lazy />);
+    await act(async () => callback([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver));
+    await waitFor(() => expect(screen.getByText('blob:sticky')).toBeTruthy());
+    await act(async () => callback([{ isIntersecting: false } as IntersectionObserverEntry], {} as IntersectionObserver));
+    await act(async () => callback([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver));
+    expect(mocks.render).toHaveBeenCalledOnce();
+    expect(mocks.release).not.toHaveBeenCalled();
+    view.unmount();
+    expect(mocks.release).toHaveBeenCalledWith(expect.objectContaining({ url: 'blob:sticky' }));
   });
 });

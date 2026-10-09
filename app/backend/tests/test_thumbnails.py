@@ -159,6 +159,37 @@ def test_thumbnail_head_content_type_matches_get_cold_and_warm(tmp_path, monkeyp
         _close(client)
 
 
+@pytest.mark.parametrize("validator", [
+    lambda etag: etag,
+    lambda etag: f"W/{etag}",
+    lambda etag: f'"other", W/{etag}',
+    lambda _etag: "*",
+])
+def test_thumbnail_if_none_match_returns_304_without_full_fetch_or_render(tmp_path, monkeypatch, validator):
+    app, client = _client(tmp_path, {"x.png": _image_bytes()}, [{"virtual_path": "x.png", "local_path": "x.png"}])
+    service = app.state.thumbnail_service
+    url = "/api/thumbnails/x.png?scale=0.5"
+    try:
+        rendered = client.get(url)
+        assert rendered.status_code == 200
+        etag = rendered.headers["etag"]
+        monkeypatch.setattr(service, "_source_get", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("full GET")))
+        monkeypatch.setattr(service, "_render", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("render")))
+
+        response = client.get(url, headers={"If-None-Match": validator(etag)})
+        assert response.status_code == 304
+        assert response.content == b""
+        assert response.headers["etag"] == etag
+        assert response.headers["cache-control"] == "no-cache"
+
+        head = client.head(url, headers={"If-None-Match": validator(etag)})
+        assert head.status_code == 304
+        assert head.content == b""
+        assert "content-length" not in head.headers
+    finally:
+        _close(client)
+
+
 @pytest.mark.parametrize("scale", ["nan", "inf", "0", "0.2", "2", "1/8", ""])
 def test_thumbnail_rejects_invalid_scale(tmp_path, scale):
     _, client = _client(tmp_path, {"x.png": _image_bytes()}, [{
@@ -327,7 +358,7 @@ def test_thumbnail_rebind_same_virtual_path_uses_new_source_version(tmp_path):
             "virtual_path": "stable/scan.png", "local_path": "second.png",
         }]})
         assert rematched.status_code == 200
-        second = client.get("/api/thumbnails/stable/scan.png?scale=0.5")
+        second = client.get("/api/thumbnails/stable/scan.png?scale=0.5", headers={"If-None-Match": first.headers["etag"]})
         assert second.status_code == 200 and second.headers["x-thumbnail-width"] == "60"
         assert second.headers["x-source-etag"] != first.headers["x-source-etag"]
         assert second.headers["etag"] != first.headers["etag"]

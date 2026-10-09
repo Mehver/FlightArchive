@@ -12,7 +12,7 @@ import { ScanStudioDialog } from './ScanStudioDialog';
 const mocks = vi.hoisted(() => ({
   crop: vi.fn(),
   updateFlight: vi.fn(),
-  loadBoundedSource: vi.fn(),
+  loadStudioSource: vi.fn(),
   assertDecodedLimits: vi.fn(),
 }));
 
@@ -20,7 +20,7 @@ vi.mock('../domain/BusinessDataProvider', () => ({
   useBusinessData: () => ({ data: { flights: [] }, updateFlight: mocks.updateFlight, saveDocument: vi.fn().mockResolvedValue({ ok: true }) }),
 }));
 vi.mock('../rfg/api', () => ({ resourceUrl: (path: string) => `/res/${path}` }));
-vi.mock('../resources/browserImageRenderer', () => ({ loadBoundedSource: mocks.loadBoundedSource, assertDecodedLimits: mocks.assertDecodedLimits }));
+vi.mock('../resources/browserImageRenderer', () => ({ loadStudioSource: mocks.loadStudioSource, assertDecodedLimits: mocks.assertDecodedLimits }));
 vi.mock('../state/AppState', () => ({
   useAppState: () => ({ notify: vi.fn(), showError: vi.fn() }),
 }));
@@ -95,7 +95,7 @@ beforeEach(() => {
     releasePointerCapture: { configurable: true, value: vi.fn() },
   });
   mocks.crop.mockResolvedValue({ blob: new Blob(['crop']), width: 100, height: 50 });
-  mocks.loadBoundedSource.mockResolvedValue(new Blob(['source']));
+  mocks.loadStudioSource.mockResolvedValue({ blob: new Blob(['source']), sourceWidth: imageSize.width, sourceHeight: imageSize.height });
   mocks.updateFlight.mockReturnValue(flight());
 });
 
@@ -107,7 +107,7 @@ afterEach(() => {
 
 describe('ScanStudioDialog rotated-rectangle workflow', () => {
   it('shows a bounded-source rejection without assigning an image URL', async () => {
-    mocks.loadBoundedSource.mockRejectedValueOnce(new Error('source-too-large'));
+    mocks.loadStudioSource.mockRejectedValueOnce(new Error('source-too-large'));
     renderDialog(flight());
     expect(await screen.findByText(/could not load the bound image/i)).not.toBeNull();
     expect(URL.createObjectURL).not.toHaveBeenCalled();
@@ -115,7 +115,7 @@ describe('ScanStudioDialog rotated-rectangle workflow', () => {
 
   it('does not publish a stale blob URL after the studio is unmounted', async () => {
     let resolve!: (blob: Blob) => void;
-    mocks.loadBoundedSource.mockReturnValueOnce(new Promise<Blob>((done) => { resolve = done; }));
+    mocks.loadStudioSource.mockReturnValueOnce(new Promise((done) => { resolve = (blob: Blob) => done({ blob }); }));
     const view = renderDialog(flight());
     view.unmount();
     resolve(new Blob(['late']));
@@ -140,7 +140,7 @@ describe('ScanStudioDialog rotated-rectangle workflow', () => {
     fireEvent.pointerMove(cropCanvas, { clientX: 100, clientY: 50 });
     expect(await screen.findByRole('img', { name: 'Magnified source pixels' })).not.toBeNull();
     expect(screen.getByRole('slider', { name: 'Magnification' })).not.toBeNull();
-    expect(mocks.crop).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ centerX: 200, centerY: 100, width: 160, height: 80, rotationDegrees: 15 }));
+    expect(mocks.crop).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ centerX: 200, centerY: 100, width: 160, height: 80, rotationDegrees: 15 }), { width: 400, height: 200 });
     expect(mocks.crop.mock.calls[0][1]).not.toHaveProperty('corners');
   });
 
@@ -164,6 +164,22 @@ describe('ScanStudioDialog rotated-rectangle workflow', () => {
     expect(saved).toEqual({ centerX: 200, centerY: 100, width: 160, height: 80, rotationDegrees: 0 });
     expect(saved).not.toHaveProperty('corners');
     expect(onSaved).toHaveBeenCalledOnce();
+  });
+
+  it('restores rotated canonical coordinates and crops against bounded thumbnail pixels', async () => {
+    imageSize.width = 1750;
+    imageSize.height = 1250;
+    mocks.loadStudioSource.mockResolvedValue({ blob: new Blob(['thumbnail']), sourceWidth: 14_001, sourceHeight: 10_001, imageWidth: 1750, imageHeight: 1250 });
+    const original = { centerX: 7000.5, centerY: 5000.5, width: 5000, height: 2000, rotationDegrees: 12 };
+    renderDialog(flight(layout(original)));
+
+    await waitFor(() => expect(mocks.crop).toHaveBeenCalledWith(expect.anything(), original, { width: 14_001, height: 10_001 }));
+    fireEvent.click(screen.getByRole('button', { name: /auto-fit/i }));
+    const save = screen.getByRole('button', { name: /save layout/i }) as HTMLButtonElement;
+    await waitFor(() => expect(save.disabled).toBe(false));
+    fireEvent.click(save);
+    await waitFor(() => expect(mocks.updateFlight).toHaveBeenCalledOnce());
+    expect(mocks.updateFlight.mock.calls[0][1].paperBoardingPassLayouts.paperBoardingPassFront.crop).toEqual(original);
   });
 
   it('clears the magnifier when the pointer leaves the crop canvas', async () => {

@@ -7,6 +7,7 @@ import {
   type ScanWorkerResponse,
   type WorkerCrop,
   type WorkerDetectionResult,
+  type WorkerSourceBounds,
 } from './scanWorkerProtocol';
 
 const REQUEST_TIMEOUT_MS = 60_000;
@@ -19,7 +20,7 @@ type Pending = {
 
 type RequestToSend =
   | { type: 'detect'; image: ImageBitmap; algorithm: DetectionAlgorithm }
-  | { type: 'crop'; image: ImageBitmap; crop: WorkerCrop };
+  | { type: 'crop'; image: ImageBitmap; crop: WorkerCrop; sourceBounds?: WorkerSourceBounds };
 
 /**
  * Per-dialog worker connection. A timed-out, failed, or disposed connection is
@@ -37,8 +38,8 @@ export class ScanWorkerClient {
     return response.result;
   }
 
-  async crop(image: ImageBitmap, crop: WorkerCrop): Promise<{ blob: Blob; width: number; height: number }> {
-    const response = await this.request({ type: 'crop', image, crop }, [image]);
+  async crop(image: ImageBitmap, crop: WorkerCrop, sourceBounds?: WorkerSourceBounds): Promise<{ blob: Blob; width: number; height: number }> {
+    const response = await this.request({ type: 'crop', image, crop, sourceBounds }, [image]);
     if (!response.ok || response.type !== 'crop') throw new Error('scan-worker-invalid-response');
     return { blob: response.blob, width: response.width, height: response.height };
   }

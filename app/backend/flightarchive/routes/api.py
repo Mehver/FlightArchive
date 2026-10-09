@@ -52,6 +52,16 @@ def _thumbnail_error(exc: ThumbnailError) -> ApiError:
     return ApiError(exc.status, exc.code, exc.message)
 
 
+def _etag_matches(if_none_match: str, current: str) -> bool:
+    """Weak comparison for cache validation on GET/HEAD representations."""
+    def opaque(value: str) -> str:
+        value = value.strip()
+        return value[2:].lstrip() if value[:2].lower() == "w/" else value
+
+    return any(candidate.strip() == "*" or opaque(candidate) == opaque(current)
+               for candidate in if_none_match.split(","))
+
+
 @router.api_route("/thumbnails/{virtual_path:path}", methods=["GET", "HEAD"])
 async def thumbnail(virtual_path: str, request: Request):
     try:
@@ -61,7 +71,15 @@ async def thumbnail(virtual_path: str, request: Request):
             raise ThumbnailError(400, "invalid-thumbnail-query", "only one scale parameter is permitted")
         scale, scale_text = parse_scale(request.query_params.get("scale"))
         service = request.app.state.thumbnail_service
-        result = await (service.head(virtual_path, scale, scale_text) if request.method == "HEAD" else service.get(virtual_path, scale, scale_text))
+        validator = request.headers.get("if-none-match")
+        if validator is not None:
+            inspected = await service.head(virtual_path, scale, scale_text)
+            if _etag_matches(validator, inspected.headers["ETag"]):
+                headers = {name: value for name, value in inspected.headers.items() if name.lower() != "content-length"}
+                return Response(status_code=304, headers=headers)
+            result = inspected if request.method == "HEAD" else await service.get(virtual_path, scale, scale_text)
+        else:
+            result = await (service.head(virtual_path, scale, scale_text) if request.method == "HEAD" else service.get(virtual_path, scale, scale_text))
     except ThumbnailError as exc:
         raise _thumbnail_error(exc) from exc
     response = Response(

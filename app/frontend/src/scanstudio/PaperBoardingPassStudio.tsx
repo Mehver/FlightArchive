@@ -16,8 +16,8 @@
 //   `rotationDegrees`, which starts at 0 after a new crop and never
 //   incorporates the source crop angle.
 //
-// Interactive crop processing runs in the browser against the same-origin safe
-// RFG resource URL. Only portable, image-free paper boarding-pass layout metadata is
+// Interactive crop processing runs in the browser against a bounded same-origin
+// relay bitmap in the original logical coordinate system. Only portable, image-free paper boarding-pass layout metadata is
 // persisted via the normal flight update path; backend previews are disposable.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -41,8 +41,7 @@ import {
   Typography,
 } from '@mui/material';
 import { useBusinessData } from '../domain/BusinessDataProvider';
-import { resourceUrl } from '../rfg/api';
-import { assertDecodedLimits, loadBoundedSource } from '../resources/browserImageRenderer';
+import { assertDecodedLimits, loadStudioSource, type StudioSource } from '../resources/browserImageRenderer';
 import type { FlightRecord, PaperBoardingPassLayout } from '../api/types';
 import { useAppState } from '../state/AppState';
 import { useTranslation, type TranslationKey } from '../i18n';
@@ -54,6 +53,7 @@ import {
   defaultQuad,
   isUsableQuad,
   isQuadWithinBounds,
+  mapCropRectBetweenBounds,
   normalizeQuadGeometry,
   quadEdgeLength,
   rectFromQuad,
@@ -146,6 +146,7 @@ export function PaperBoardingPassStudio({
   const [engineLoading, setEngineLoading] = useState(false);
   const [engineError, setEngineError] = useState(false);
   const [image, setImage] = useState<HTMLImageElement | null>(null);
+  const [sourceBounds, setSourceBounds] = useState<QuadBounds | null>(null);
   const [imageError, setImageError] = useState(false);
   const [algorithm, setAlgorithm] = useState<DetectionAlgorithm>(existingLayout?.algorithm ?? 'adaptive');
   const [detecting, setDetecting] = useState(false);
@@ -179,7 +180,7 @@ export function PaperBoardingPassStudio({
 
   const template = templateById(templateId, templateSide);
   const croppedAspect = cropped ? cropped.width / cropped.height : 1;
-  const imageBounds: QuadBounds | undefined = image ? { width: image.naturalWidth, height: image.naturalHeight } : undefined;
+  const imageBounds: QuadBounds | undefined = sourceBounds ?? undefined;
   // Cropping is only meaningful for a rectangle fully inside the source image.
   const quadUsable = quad !== null && imageBounds !== undefined && isUsableQuad(quad) && isQuadWithinBounds(quad, imageBounds);
 
@@ -212,6 +213,7 @@ export function PaperBoardingPassStudio({
     setEngineLoading(false);
     setEngineError(false);
     setImage(null);
+    setSourceBounds(null);
     setImageError(false);
     setQuad(null);
     setCropDirty(true);
@@ -228,17 +230,25 @@ export function PaperBoardingPassStudio({
     let cancelled = false;
     const controller = new AbortController();
     let sourceUrl: string | null = null;
+    let loadedSource: StudioSource | null = null;
     if (resourcePath) {
       const img = new Image();
       img.onload = () => {
         if (cancelled) return;
-        try { assertDecodedLimits(img.naturalWidth, img.naturalHeight); } catch { setImageError(true); return; }
+        const bounds = loadedSource?.sourceWidth && loadedSource.sourceHeight
+          ? { width: loadedSource.sourceWidth, height: loadedSource.sourceHeight }
+          : { width: img.naturalWidth, height: img.naturalHeight };
+        try {
+          assertDecodedLimits(img.naturalWidth, img.naturalHeight);
+          if (loadedSource?.imageWidth && (img.naturalWidth !== loadedSource.imageWidth || img.naturalHeight !== loadedSource.imageHeight)) throw new Error('thumbnail-dimensions-mismatch');
+        } catch { setImageError(true); return; }
         setImage(img);
+        setSourceBounds(bounds);
         if (existingLayout) {
           const restoredQuad = rectToQuad(existingLayout.crop);
           setQuad(restoredQuad);
           // An out-of-bounds saved rectangle cannot be repaired in placement.
-          if (!isQuadWithinBounds(restoredQuad, { width: img.naturalWidth, height: img.naturalHeight })) setStage('crop');
+          if (!isQuadWithinBounds(restoredQuad, bounds)) setStage('crop');
           setCropDirty(true);
           setNoteKey('studioExistingLayout');
         }
@@ -246,9 +256,10 @@ export function PaperBoardingPassStudio({
       img.onerror = () => {
         if (!cancelled) setImageError(true);
       };
-      void loadBoundedSource(resourceUrl(resourcePath), controller.signal).then((blob) => {
+      void loadStudioSource(resourcePath, controller.signal).then((source) => {
         if (cancelled) return;
-        sourceUrl = URL.createObjectURL(blob);
+        loadedSource = source;
+        sourceUrl = URL.createObjectURL(source.blob);
         img.src = sourceUrl;
       }, (reason: unknown) => {
         if (!cancelled && !(reason instanceof DOMException && reason.name === 'AbortError')) setImageError(true);
@@ -332,15 +343,18 @@ export function PaperBoardingPassStudio({
           updateQuad(defaultQuad(imageBounds));
           setNoteKey('studioDetectNone');
         } else {
-          updateQuad(
-              rectToQuad({
-                centerX: result.center.x,
-                centerY: result.center.y,
-                width: result.size.width,
-                height: result.size.height,
-                rotationDegrees: result.rotation,
-              }),
-          );
+          const thumbnailRect = {
+                 centerX: result.center.x,
+                 centerY: result.center.y,
+                 width: result.size.width,
+                 height: result.size.height,
+                 rotationDegrees: result.rotation,
+              };
+          updateQuad(rectToQuad(mapCropRectBetweenBounds(
+            thumbnailRect,
+            { width: image.naturalWidth, height: image.naturalHeight },
+            imageBounds,
+          )));
           setNoteKey('studioDetectDone');
         }
       } catch (error) {
@@ -367,7 +381,7 @@ export function PaperBoardingPassStudio({
     const generation = requestGenerationRef.current;
     try {
       const rect = normalizeQuadGeometry(quad, imageBounds);
-      const warped = await worker().crop(await bitmapFor(image), rect);
+       const warped = await worker().crop(await bitmapFor(image), rect, imageBounds);
       if (generation !== requestGenerationRef.current) return false;
       setEngineReady(true);
       const url = URL.createObjectURL(warped.blob);
@@ -777,6 +791,7 @@ export function PaperBoardingPassStudio({
                     {image && cropRect ? (
                       <CropCanvas
                         image={image}
+                        sourceBounds={imageBounds}
                         crop={cropRect}
                         mode="rotatable"
                         zoom={1}

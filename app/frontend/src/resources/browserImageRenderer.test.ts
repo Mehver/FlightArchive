@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 import { describe, expect, it, vi } from 'vitest';
-import { BrowserImageRenderer, imageHeaderDimensions, loadBoundedSource, MAX_SOURCE_BYTES, validateRenderBounds } from './browserImageRenderer';
+import { BrowserImageRenderer, imageHeaderDimensions, loadBoundedSource, loadStudioSource, MAX_SOURCE_BYTES, validateRenderBounds } from './browserImageRenderer';
 
 const PNG_HEADER = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 3, 32, 0, 0, 2, 88]);
 function response(body: Uint8Array | null, headers: Record<string, string> = {}, status = 200) { return new Response(body ? new Blob([Uint8Array.from(body)]) : null, { status, headers }); }
@@ -20,7 +20,7 @@ function renderer(fetcher: typeof fetch, sourceWidth = 800, sourceHeight = 600) 
   const instance = new BrowserImageRenderer({
     fetcher, decode: vi.fn(async (blob: Blob) => { const scale = Number(await blob.text()); return { source: {} as CanvasImageSource, width: Math.max(1, Math.floor(sourceWidth * scale)), height: Math.max(1, Math.floor(sourceHeight * scale)), close: vi.fn() }; }),
     makeCanvas: vi.fn((width: number, height: number) => ({ width, height, context, toBlob: async () => new Blob(['rendered'], { type: 'image/webp' }) })),
-    createObjectURL: vi.fn(() => `blob:${Math.random()}`), revokeObjectURL, now: () => 1000,
+    createObjectURL: vi.fn(() => `blob:${Math.random()}`), revokeObjectURL,
   });
   return { instance, context, revokeObjectURL };
 }
@@ -42,6 +42,77 @@ describe('browser image renderer relay cutover', () => {
     const oversized = vi.fn(async () => response(null, { 'Content-Length': String(MAX_SOURCE_BYTES + 1) }));
     await expect(loadBoundedSource('/res/oversized.png', undefined, oversized as typeof fetch)).rejects.toThrow('source-too-large');
     expect(oversized).toHaveBeenCalledOnce();
+  });
+
+  it('loads a large raster studio source only through the largest safe relay thumbnail', async () => {
+    const fetcher = relayFetcher(14_001, 10_001, 80 * 1024 * 1024);
+    const source = await loadStudioSource('large scan.jpg', undefined, fetcher);
+    expect(source).toMatchObject({ sourceWidth: 14_001, sourceHeight: 10_001, imageWidth: 1750, imageHeight: 1250 });
+    expect(vi.mocked(fetcher).mock.calls.map(([url, init]) => [String(url), init?.method])).toEqual([
+      ['/api/thumbnails/large%20scan.jpg?scale=0.015625', 'HEAD'],
+      ['/api/thumbnails/large%20scan.jpg?scale=0.125', 'GET'],
+    ]);
+  });
+
+  it('retries only an encoded-output 413 at lower Studio scales while preserving logical bounds', async () => {
+    const attempted: number[] = [];
+    const fetcher = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      const scale = scaleFromUrl(url);
+      if (init?.method === 'HEAD') return response(null, relayHeaders(14_001, 10_001, 80 * 1024 * 1024, scale));
+      attempted.push(scale);
+      if (scale === 0.125 || scale === 0.0625) return new Response(JSON.stringify({ error: { code: 'thumbnail-output-too-large' } }), { status: 413, headers: { 'Content-Type': 'application/json' } });
+      return response(new TextEncoder().encode(String(scale)), relayHeaders(14_001, 10_001, 80 * 1024 * 1024, scale));
+    }) as unknown as typeof fetch;
+    const source = await loadStudioSource('entropy.png', undefined, fetcher);
+    expect(attempted).toEqual([0.125, 0.0625, 0.03125]);
+    expect(source).toMatchObject({ sourceWidth: 14_001, sourceHeight: 10_001, imageWidth: 437, imageHeight: 312 });
+  });
+
+  it('does not retry other 413 failures', async () => {
+    const fetcher = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      const scale = scaleFromUrl(url);
+      if (init?.method === 'HEAD') return response(null, relayHeaders(14_001, 10_001, 80 * 1024 * 1024, scale));
+      return new Response(JSON.stringify({ error: { code: 'thumbnail-source-dimensions-too-large' } }), { status: 413, headers: { 'Content-Type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    await expect(loadStudioSource('bomb.png', undefined, fetcher)).rejects.toThrow('resource-fetch-failed:413');
+    expect(vi.mocked(fetcher).mock.calls).toHaveLength(2);
+  });
+
+  it('stops Studio fallback immediately when aborted', async () => {
+    const controller = new AbortController();
+    const fetcher = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      const scale = scaleFromUrl(url);
+      if (init?.method === 'HEAD') return response(null, relayHeaders(14_001, 10_001, 80 * 1024 * 1024, scale));
+      controller.abort();
+      return new Response(JSON.stringify({ error: { code: 'thumbnail-output-too-large' } }), { status: 413, headers: { 'Content-Type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    await expect(loadStudioSource('cancel.png', controller.signal, fetcher)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(vi.mocked(fetcher).mock.calls).toHaveLength(2);
+  });
+
+  it('reports an encoded-output failure at the minimum scale without looping', async () => {
+    const fetcher = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      const scale = scaleFromUrl(url);
+      if (init?.method === 'HEAD') return response(null, relayHeaders(300_000, 10, 100_000, scale));
+      return new Response(JSON.stringify({ error: { code: 'thumbnail-output-too-large' } }), { status: 413, headers: { 'Content-Type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    await expect(loadStudioSource('minimum.png', undefined, fetcher)).rejects.toThrow('resource-fetch-failed:413');
+    expect(vi.mocked(fetcher).mock.calls).toHaveLength(2);
+    expect(scaleFromUrl(vi.mocked(fetcher).mock.calls[1][0])).toBe(0.015625);
+  });
+
+  it('retains bounded original loading for formats unsupported by the raster relay', async () => {
+    const fetcher = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).startsWith('/api/thumbnails/')) return response(null, {}, 415);
+      return response(init?.method === 'HEAD' ? null : new TextEncoder().encode('<svg/>'), { 'Content-Length': '6', 'Content-Type': 'image/svg+xml' });
+    }) as unknown as typeof fetch;
+    const source = await loadStudioSource('vector.svg', undefined, fetcher);
+    expect(source.sourceWidth).toBeUndefined();
+    expect(vi.mocked(fetcher).mock.calls.map(([url, init]) => [String(url), init?.method])).toEqual([
+      ['/api/thumbnails/vector.svg?scale=0.015625', 'HEAD'],
+      ['/res/vector.svg', 'HEAD'],
+      ['/res/vector.svg', 'GET'],
+    ]);
   });
 
   it('uses relay HEAD metadata and relay GET only, never /res, while preserving original crop coordinates', async () => {
@@ -69,11 +140,11 @@ describe('browser image renderer relay cutover', () => {
     await expect(renderer(fetcher as typeof fetch).instance.render({ virtualPath: 'changed.png' })).rejects.toThrow('thumbnail-source-changed');
   });
 
-  it('reuses cached final encoded bytes but issues consumer-owned URLs', async () => {
+  it('does not retain an application blob cache and leaves request reuse to HTTP caching', async () => {
     const fetcher = relayFetcher(); const { instance, revokeObjectURL } = renderer(fetcher);
     const first = await instance.render({ virtualPath: 'same.png' }); const second = await instance.render({ virtualPath: 'same.png' });
     expect(first.url).not.toBe(second.url);
-    expect(vi.mocked(fetcher).mock.calls.filter(([, init]) => init?.method === 'GET')).toHaveLength(1);
+    expect(vi.mocked(fetcher).mock.calls.filter(([, init]) => init?.method === 'GET')).toHaveLength(2);
     instance.release(first); expect(revokeObjectURL).toHaveBeenCalledWith(first.url); instance.dispose(); expect(revokeObjectURL).toHaveBeenCalledWith(second.url);
   });
 

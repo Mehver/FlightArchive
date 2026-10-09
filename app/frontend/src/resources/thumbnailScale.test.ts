@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 import { describe, expect, it } from 'vitest';
-import { selectThumbnailScale } from './thumbnailScale';
+import { selectStudioThumbnailScale, selectThumbnailScale } from './thumbnailScale';
 
 describe('selectThumbnailScale', () => {
   it('is deterministic and applies the documented compressed-byte hint', () => {
@@ -36,5 +36,16 @@ describe('selectThumbnailScale', () => {
 
   it('keeps small images at scale one', () => {
     expect(selectThumbnailScale({ sourceWidth: 320, sourceHeight: 180, sourceBytes: 20_000, maxDimension: 512 })).toBe(1);
+  });
+});
+
+describe('selectStudioThumbnailScale', () => {
+  it('uses the largest safe relay scale without applying the display byte hint', () => {
+    expect(selectStudioThumbnailScale({ sourceWidth: 14_001, sourceHeight: 10_001 })).toBe(0.125);
+    expect(selectStudioThumbnailScale({ sourceWidth: 4000, sourceHeight: 3000 })).toBe(0.5);
+  });
+
+  it('keeps ordinary studio images at their original scale', () => {
+    expect(selectStudioThumbnailScale({ sourceWidth: 1600, sourceHeight: 900 })).toBe(1);
   });
 });

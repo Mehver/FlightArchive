@@ -64,6 +64,15 @@ describe('ScanWorkerClient', () => {
     await expect(detection).resolves.toEqual(result);
   });
 
+  it('passes canonical source bounds to bounded thumbnail crops', async () => {
+    const client = new ScanWorkerClient();
+    const pending = client.crop(image, crop, { width: 14_001, height: 10_001 });
+    expect(MockWorker.instances[0].messages[0].message).toMatchObject({ sourceBounds: { width: 14_001, height: 10_001 } });
+    const rejection = expect(pending).rejects.toThrow('scan-worker-disposed');
+    client.dispose();
+    await rejection;
+  });
+
   it('terminates the worker and rejects every pending request on timeout', async () => {
     vi.useFakeTimers();
     const client = new ScanWorkerClient();

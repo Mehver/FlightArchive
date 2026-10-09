@@ -12,6 +12,30 @@ export interface WorkerCrop {
   rotationDegrees: number;
 }
 
+export interface WorkerSourceBounds { width: number; height: number }
+
+export const WORKER_OUTPUT_PIXEL_BUDGET = 4_000_000;
+export const WORKER_OUTPUT_DIMENSION_LIMIT = 4096;
+
+/** Keep disposable crop previews bounded even when canonical crops are huge. */
+export function boundedCropOutputSize(crop: Pick<WorkerCrop, 'width' | 'height'>): WorkerSourceBounds {
+  if (![crop.width, crop.height].every(Number.isFinite) || crop.width <= 0 || crop.height <= 0) throw new Error('invalid-crop-rectangle');
+  const scale = Math.min(
+    1,
+    WORKER_OUTPUT_DIMENSION_LIMIT / crop.width,
+    WORKER_OUTPUT_DIMENSION_LIMIT / crop.height,
+    Math.sqrt(WORKER_OUTPUT_PIXEL_BUDGET / (crop.width * crop.height)),
+  );
+  const quantize = scale < 1 ? Math.floor : Math.round;
+  let width = Math.max(1, quantize(crop.width * scale));
+  let height = Math.max(1, quantize(crop.height * scale));
+  if (width * height > WORKER_OUTPUT_PIXEL_BUDGET) {
+    if (width >= height) width = Math.max(1, Math.floor(WORKER_OUTPUT_PIXEL_BUDGET / height));
+    else height = Math.max(1, Math.floor(WORKER_OUTPUT_PIXEL_BUDGET / width));
+  }
+  return { width, height };
+}
+
 export interface WorkerDetectionResult {
   center: { x: number; y: number };
   size: { width: number; height: number };
@@ -20,7 +44,7 @@ export interface WorkerDetectionResult {
 
 export type ScanWorkerRequest =
   | { id: number; type: 'detect'; image: ImageBitmap; algorithm: DetectionAlgorithm }
-  | { id: number; type: 'crop'; image: ImageBitmap; crop: WorkerCrop };
+  | { id: number; type: 'crop'; image: ImageBitmap; crop: WorkerCrop; sourceBounds?: WorkerSourceBounds };
 
 /** Failure codes carried by {@link ScanWorkerResponse}. */
 export type ScanWorkerErrorCode = 'opencv-init-failed' | 'processing-failed';

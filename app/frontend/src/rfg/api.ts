@@ -87,8 +87,7 @@ export function resourceUrl(virtualPath: string): string {
   return `/res/${virtualPath.split('/').map(encodeURIComponent).join('/')}`;
 }
 
-/** Domain-neutral backend thumbnail relay. Raster display must use this route,
- * while explicit downloads and studio editing continue to use resourceUrl. */
+/** Domain-neutral backend thumbnail relay for raster display and bounded Studio editing. */
 export function thumbnailUrl(virtualPath: string, scale: number): string {
   return `/api/thumbnails/${virtualPath.split('/').map(encodeURIComponent).join('/')}?scale=${scale}`;
 }

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 import { describe, expect, it } from 'vitest';
-import { isQuadWithinBounds, moveQuadVertex, normalizeQuadGeometry, rectFromQuad, rectToQuad, rotateQuadWithinBounds, rotationHandlePoint } from './cropGeometry';
+import { isQuadWithinBounds, mapCropRectBetweenBounds, moveQuadVertex, normalizeQuadGeometry, rectFromQuad, rectToQuad, rotateQuadWithinBounds, rotationHandlePoint } from './cropGeometry';
 
 describe('rotated crop rectangle', () => {
   it('keeps right angles and the opposite corner fixed while resizing a corner', () => {
@@ -38,5 +38,16 @@ describe('rotated crop rectangle', () => {
 
     expect(isQuadWithinBounds(rectToQuad(normalized), bounds)).toBe(true);
     expect(normalized.centerX).not.toBe(450);
+  });
+  it('maps detected thumbnail geometry with independent rounded X/Y scales', () => {
+    const mapped = mapCropRectBetweenBounds(
+      { centerX: 875, centerY: 625, width: 500, height: 200, rotationDegrees: 12 },
+      { width: 1750, height: 1250 },
+      { width: 14_001, height: 10_001 },
+    );
+    expect(mapped.centerX).toBeCloseTo(7000.5, 8);
+    expect(mapped.centerY).toBeCloseTo(5000.5, 8);
+    expect(mapped.rotationDegrees).toBeCloseTo(12, 2);
+    expect(mapped.width).toBeGreaterThan(4000);
   });
 });

@@ -18,6 +18,7 @@ vi.mock('../resources/useBrowserImage', () => ({
       : { status: 'loading', src: null };
   },
 }));
+vi.mock('../i18n', () => ({ useTranslation: () => ({ t: () => 'Loading…' }) }));
 import { AirlineHorizontalLogo, AirlineLogo } from './AirlineLogo';
 
 afterEach(() => { cleanup(); mocks.rasterWork.mockReset(); mocks.rasterDisabled.mockReset(); vi.unstubAllGlobals(); });
@@ -45,9 +46,14 @@ describe('AirlineLogo', () => {
     expect(getComputedStyle(image).width).toBe('40px');
     expect(getComputedStyle(image).height).toBe('40px');
     expect(getComputedStyle(image).objectFit).toBe('contain');
+    const host = image.closest('[role="img"]') as HTMLElement;
+    const loading = screen.getByTestId('airline-logo-loading');
+    expect(getComputedStyle(host).position).toBe('relative');
+    expect(getComputedStyle(loading).position).toBe('absolute');
+    expect(getComputedStyle(loading).inset).toBe('0px');
   });
 
-  it.each(['objects/banner.png', 'objects/banner.webp'])('gates the offscreen horizontal raster %s and releases it after exit', async (path) => {
+  it.each(['objects/banner.png', 'objects/banner.webp'])('gates the offscreen horizontal raster %s and keeps it after exit', async (path) => {
     const callbacks: IntersectionObserverCallback[] = [];
     const observed: Element[] = [];
     class Observer {
@@ -78,8 +84,8 @@ describe('AirlineLogo', () => {
     mocks.rasterDisabled.mockClear();
     await act(async () => callbacks[0]([{ isIntersecting: false } as IntersectionObserverEntry], {} as IntersectionObserver));
     expect(mocks.rasterWork).not.toHaveBeenCalled();
-    expect(mocks.rasterDisabled).toHaveBeenCalledWith(path);
-    expect(container.querySelector('img')).toBeNull();
+    expect(mocks.rasterDisabled).not.toHaveBeenCalled();
+    expect(container.querySelector('img')).not.toBeNull();
   });
 
   it('keeps a stable observed horizontal-logo host when its source appears later', async () => {

@@ -13,7 +13,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { PaperBoardingPassLayout } from '../api/types';
 import { LanguageProvider } from '../i18n';
 
@@ -52,6 +52,9 @@ describe('BoardingPassFrame', () => {
     renderFrame(<BoardingPassFrame slot="paperBoardingPassBack" resourcePath="obj/scan.png" layout={undefined} />);
     const img = screen.getByAltText(/paper back/i);
     expect(img.getAttribute('src')).toBe('blob:thumbnail-obj/scan.png');
+    expect(screen.getByRole('progressbar', { name: /loading/i })).not.toBeNull();
+    fireEvent.load(img);
+    expect(screen.queryByRole('progressbar', { name: /loading/i })).toBeNull();
     expect(screen.getByText(/unprepared scan/i)).not.toBeNull();
   });
 

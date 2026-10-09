@@ -24,8 +24,8 @@
  * artwork comes from the persisted layout's templateId.
  */
 
-import { useEffect, useState } from 'react';
-import { Box, Tooltip, Typography } from '@mui/material';
+import { useEffect, useLayoutEffect, useState } from 'react';
+import { Box, CircularProgress, Tooltip, Typography } from '@mui/material';
 import type { Theme } from '@mui/material/styles';
 import { useTheme } from '@mui/material/styles';
 import BrokenImageOutlinedIcon from '@mui/icons-material/BrokenImageOutlined';
@@ -62,27 +62,26 @@ function ImageUnavailable({ error }: { error: unknown }) {
 /** Full-bleed cover image using a bounded browser thumbnail, with a graceful
  *  broken-image fallback instead of an original-route download. */
 function CoverImage({ resourcePath, alt, contain = false, enabled, maxDimension }: { resourcePath: string; alt: string; contain?: boolean; enabled: boolean; maxDimension: number }) {
+  const { t } = useTranslation();
   const image = useBrowserImage(resourcePath, { enabled, maxDimension });
   const [elementFailed, setElementFailed] = useState(false);
+  const [elementLoaded, setElementLoaded] = useState(false);
   useEffect(() => setElementFailed(false), [resourcePath, image.src]);
+  useLayoutEffect(() => setElementLoaded(false), [resourcePath, image.src]);
   if (image.status === 'failed' || elementFailed) return <ImageUnavailable error={image.status === 'failed' ? image.error : 'image-element-load-failed'} />;
-  if (image.status === 'loading') return null;
   return (
-    <Box
-      component="img"
-      src={image.src}
-      alt={alt}
-      loading="lazy"
-      onError={() => setElementFailed(true)}
-      sx={{
-        position: 'absolute',
-        inset: 0,
-        width: '100%',
-        height: '100%',
-        objectFit: contain ? 'contain' : 'cover',
-        display: 'block',
-      }}
-    />
+    <>
+      {image.status === 'ready' ? <Box
+        component="img"
+        src={image.src}
+        alt={alt}
+        loading="lazy"
+        onLoad={() => setElementLoaded(true)}
+        onError={() => setElementFailed(true)}
+        sx={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: contain ? 'contain' : 'cover', display: 'block', opacity: elementLoaded ? 1 : 0 }}
+      /> : null}
+      {enabled && (image.status === 'loading' || image.status === 'ready' && !elementLoaded) ? <CircularProgress size={24} aria-label={t('loading')} sx={{ position: 'absolute', left: '50%', top: '50%', ml: '-12px', mt: '-12px' }} /> : null}
+    </>
   );
 }
 
@@ -97,18 +96,21 @@ function PreparedPreview({ resourcePath, layout, box, templateUrl, dark, alt, en
   enabled: boolean;
   maxDimension: number;
 }) {
+  const { t } = useTranslation();
   const crop = layout.crop;
   const image = useBrowserImage(resourcePath, { crop, maxDimension, enabled });
   const [elementFailed, setElementFailed] = useState(false);
+  const [elementLoaded, setElementLoaded] = useState(false);
   useEffect(() => setElementFailed(false), [resourcePath, image.src]);
+  useLayoutEffect(() => setElementLoaded(false), [resourcePath, image.src]);
   if (image.status === 'failed' || elementFailed) return <ImageUnavailable error={image.status === 'failed' ? image.error : 'image-element-load-failed'} />;
-  if (image.status === 'loading') return null;
   return (
     <>
       {templateUrl ? <Box component="img" src={templateUrl} alt="" aria-hidden sx={{ position: 'absolute', inset: 0, width: '100%', height: '100%', opacity: 0.55, filter: dark ? 'invert(1)' : 'none' }} /> : null}
-      <Box sx={{ position: 'absolute', left: `${box.leftPct}%`, top: `${box.topPct}%`, width: `${box.widthPct}%`, height: `${box.heightPct}%`, transform: `rotate(${box.rotationDegrees}deg)`, overflow: 'hidden', boxShadow: 1, bgcolor: 'background.paper' }}>
-        <Box component="img" src={image.src} alt={alt} loading="lazy" onError={() => setElementFailed(true)} sx={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'fill', display: 'block' }} />
-      </Box>
+      {image.status === 'ready' ? <Box sx={{ position: 'absolute', left: `${box.leftPct}%`, top: `${box.topPct}%`, width: `${box.widthPct}%`, height: `${box.heightPct}%`, transform: `rotate(${box.rotationDegrees}deg)`, overflow: 'hidden', boxShadow: 1, bgcolor: 'background.paper' }}>
+        <Box component="img" src={image.src} alt={alt} loading="lazy" onLoad={() => setElementLoaded(true)} onError={() => setElementFailed(true)} sx={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'fill', display: 'block', opacity: elementLoaded ? 1 : 0 }} />
+      </Box> : null}
+      {enabled && (image.status === 'loading' || image.status === 'ready' && !elementLoaded) ? <CircularProgress size={24} aria-label={t('loading')} sx={{ position: 'absolute', left: '50%', top: '50%', ml: '-12px', mt: '-12px' }} /> : null}
     </>
   );
 }

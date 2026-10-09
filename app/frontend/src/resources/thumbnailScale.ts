@@ -19,6 +19,21 @@ export interface ThumbnailScaleRequest {
   maxDimension: number;
 }
 
+/** Largest relay output that remains inside the backend's hard decode budget. */
+export function selectStudioThumbnailScale(source: { sourceWidth: number; sourceHeight: number }): ThumbnailScale {
+  const { sourceWidth, sourceHeight } = source;
+  if (![sourceWidth, sourceHeight].every(Number.isFinite)
+    || !Number.isInteger(sourceWidth) || !Number.isInteger(sourceHeight)
+    || sourceWidth <= 0 || sourceHeight <= 0) throw new Error('invalid-thumbnail-scale-input');
+  const budget = Math.min(
+    1,
+    THUMBNAIL_DIMENSION_LIMIT / sourceWidth,
+    THUMBNAIL_DIMENSION_LIMIT / sourceHeight,
+    Math.sqrt(THUMBNAIL_PIXEL_BUDGET / (sourceWidth * sourceHeight)),
+  );
+  return THUMBNAIL_SCALES.find((scale) => scale <= budget) ?? THUMBNAIL_SCALES[THUMBNAIL_SCALES.length - 1];
+}
+
 /**
  * Chooses the smallest supported dyadic scale that reaches the requested crop
  * display quality (within the 1280x720 quality cap). Safety limits are separate

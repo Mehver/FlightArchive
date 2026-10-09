@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 import { describe, expect, it } from 'vitest';
-import { containCanvasGeometry, rotationControlInsetForCrop } from './CropCanvas';
+import { containCanvasGeometry, imageSampleRect, rotationControlInsetForCrop } from './CropCanvas';
 
 describe('containCanvasGeometry', () => {
   it.each([
@@ -36,5 +36,15 @@ describe('containCanvasGeometry', () => {
     expect(edgeInset).toBeGreaterThan(0);
     expect(insetCrop).toBeLessThan(edgeInset);
     expect(5600 * geometry.sourceScale).toBeLessThanOrEqual(560 - edgeInset * 2);
+  });
+});
+
+describe('imageSampleRect', () => {
+  it('maps logical source coordinates with independent rounded thumbnail axes', () => {
+    expect(imageSampleRect(
+      { x: 7000.5, y: 5000.5, width: 1400.1, height: 1000.1 },
+      { width: 14_001, height: 10_001 },
+      { width: 1750, height: 1250 },
+    )).toEqual({ x: 875, y: 625, width: 175, height: 125 });
   });
 });

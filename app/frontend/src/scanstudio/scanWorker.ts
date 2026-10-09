@@ -6,6 +6,7 @@
 import { DocDetect } from './docDetect';
 import {
   OpenCvInitError,
+  boundedCropOutputSize,
   classifyWorkerError,
   type ScanWorkerRequest,
   type ScanWorkerResponse,
@@ -89,12 +90,12 @@ function canvasFor(image: ImageBitmap): OffscreenCanvas {
   return canvas;
 }
 
-async function crop(image: ImageBitmap, crop: { centerX: number; centerY: number; width: number; height: number; rotationDegrees: number }) {
+async function crop(image: ImageBitmap, crop: { centerX: number; centerY: number; width: number; height: number; rotationDegrees: number }, sourceBounds = { width: image.width, height: image.height }) {
   if (!Number.isFinite(crop.width) || !Number.isFinite(crop.height) || crop.width <= 0 || crop.height <= 0 || !Number.isFinite(crop.rotationDegrees)) throw new Error('invalid-crop-rectangle');
+  if (![sourceBounds.width, sourceBounds.height].every(Number.isFinite) || sourceBounds.width <= 0 || sourceBounds.height <= 0) throw new Error('invalid-source-bounds');
   const Canvas = typeof OffscreenCanvas === 'undefined' ? undefined : OffscreenCanvas;
   if (!Canvas) throw new Error('offscreen-canvas-unavailable');
-  const width = Math.max(1, Math.round(crop.width));
-  const height = Math.max(1, Math.round(crop.height));
+  const { width, height } = boundedCropOutputSize(crop);
   const output = new Canvas(width, height);
   const outputContext = output.getContext('2d');
   if (!outputContext) throw new Error('offscreen-canvas-unavailable');
@@ -106,7 +107,10 @@ async function crop(image: ImageBitmap, crop: { centerX: number; centerY: number
   outputContext.rotate((-crop.rotationDegrees * Math.PI) / 180);
   outputContext.scale(width / crop.width, height / crop.height);
   outputContext.translate(-crop.centerX, -crop.centerY);
-  outputContext.drawImage(image, 0, 0);
+  // The relay bitmap is painted into canonical source coordinates. Independent
+  // X/Y thumbnail rounding is therefore absorbed by drawImage rather than by
+  // mutating the persisted crop rectangle.
+  outputContext.drawImage(image, 0, 0, sourceBounds.width, sourceBounds.height);
   return { blob: await output.convertToBlob({ type: 'image/png' }), width, height };
 }
 
@@ -126,7 +130,7 @@ scope.onmessage = async (event: MessageEvent<ScanWorkerRequest>) => {
         : null;
       scope.postMessage({ id: request.id, ok: true, type: 'detect', result } satisfies ScanWorkerResponse);
     } else {
-      const result = await crop(request.image, request.crop);
+      const result = await crop(request.image, request.crop, request.sourceBounds);
       scope.postMessage({ id: request.id, ok: true, type: 'crop', ...result } satisfies ScanWorkerResponse);
     }
   } catch (error) {

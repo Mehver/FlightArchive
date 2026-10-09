@@ -104,16 +104,15 @@ try {
   const oriented = await page.evaluate(async () => { const { BrowserImageRenderer } = globalThis.__browserImageModule; const renderer = new BrowserImageRenderer(); const result = await renderer.render({ virtualPath: 'oriented.jpg' }); const bitmap = await createImageBitmap(await (await fetch(result.url)).blob()); const dimensions = [bitmap.width, bitmap.height]; bitmap.close(); renderer.dispose(); return dimensions; });
   assert.deepEqual(oriented, [384, 512]);
 
-  const cached = await page.evaluate(async () => { const { BrowserImageRenderer } = globalThis.__browserImageModule; const renderer = new BrowserImageRenderer(); const one = await renderer.render({ virtualPath: 'png.img' }); const two = await renderer.render({ virtualPath: 'png.img' }); renderer.release(one); renderer.release(two); renderer.dispose(); return true; });
-  assert(cached); // Each renderer owns its cache; the repeated calls above share one GET.
-  assert.equal(relayGets.get('png.img@1'), 3);
+  await page.evaluate(async () => { const { BrowserImageRenderer } = globalThis.__browserImageModule; const renderer = new BrowserImageRenderer(); const one = await renderer.render({ virtualPath: 'png.img' }); const two = await renderer.render({ virtualPath: 'png.img' }); renderer.release(one); renderer.release(two); renderer.dispose(); });
+  assert.equal(relayGets.get('png.img@1'), 4); // Mock routing disables native HTTP caching; there is intentionally no renderer LRU.
 
   const cancelled = page.evaluate(async () => { const { BrowserImageRenderer } = globalThis.__browserImageModule; const renderer = new BrowserImageRenderer(); const controller = new AbortController(); const pending = renderer.render({ virtualPath: 'cancel.img', signal: controller.signal }); setTimeout(() => controller.abort(), 25); try { await pending; return ''; } catch (error) { return error.name; } finally { renderer.dispose(); } });
   assert.equal(await cancelled, 'AbortError');
 
-  const studio = await page.evaluate(async () => { const { loadBoundedSource } = globalThis.__browserImageModule; const blob = await loadBoundedSource('/res/png.img'); const bitmap = await createImageBitmap(blob); const dimensions = [bitmap.width, bitmap.height]; bitmap.close(); return dimensions; });
-  assert.deepEqual(studio, [800, 600]); assert.equal(originalGets.get('png.img'), 1);
-  console.log(`browserImages: Chromium ${await browser.version()} passed small relay WebP decode, original-coordinate crop, EXIF-normalized logical geometry, 14000x10000 metadata scaling, cache ownership, cancellation, zero display /res requests, and explicit studio original loading (mock relay; not a live-backend benchmark)`);
+  const studio = await page.evaluate(async () => { const { loadStudioSource } = globalThis.__browserImageModule; const source = await loadStudioSource('large.jpg'); const bitmap = await createImageBitmap(source.blob); const dimensions = [bitmap.width, bitmap.height, source.sourceWidth, source.sourceHeight]; bitmap.close(); return dimensions; });
+  assert.deepEqual(studio, [1750, 1250, 14000, 10000]); assert.equal(originalGets.get('large.jpg') ?? 0, 0);
+  console.log(`browserImages: Chromium ${await browser.version()} passed small relay WebP decode, original-coordinate crop, EXIF-normalized logical geometry, 14000x10000 bounded Studio scaling, no renderer LRU, cancellation, and zero raster /res requests (mock relay; not a live-backend benchmark)`);
 } finally {
   await page.close().catch(() => undefined); await browser.close().catch(() => undefined); vite.kill('SIGTERM');
   await new Promise((resolve) => { if (vite.exitCode !== null) resolve(); else { vite.once('exit', resolve); setTimeout(resolve, 2000); } });

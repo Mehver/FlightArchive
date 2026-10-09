@@ -69,6 +69,16 @@ export function rectFromQuad(quad: Quad): CropRect {
   return { centerX, centerY, width, height, rotationDegrees };
 }
 
+/** Map a detected rectangle between independently rounded bitmap axes. */
+export function mapCropRectBetweenBounds(rect: CropRect, from: QuadBounds, to: QuadBounds): CropRect {
+  if (![from.width, from.height, to.width, to.height].every(Number.isFinite)
+    || from.width <= 0 || from.height <= 0 || to.width <= 0 || to.height <= 0) throw new Error('invalid-crop-bounds');
+  const scaleX = to.width / from.width;
+  const scaleY = to.height / from.height;
+  const mapped = rectToQuad(rect).map((vertex) => ({ x: vertex.x * scaleX, y: vertex.y * scaleY })) as Quad;
+  return rectFromQuad(mapped);
+}
+
 export function quadCenter(quad: Quad): Point {
   const rect = rectFromQuad(quad);
   return point(rect.centerX, rect.centerY);
