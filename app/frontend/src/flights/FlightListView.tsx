@@ -13,7 +13,7 @@ import ConfirmationNumberOutlinedIcon from '@mui/icons-material/ConfirmationNumb
 import { displayFlightNumber } from '../utils/format';
 import { useTranslation } from '../i18n';
 import { BoardingPassFrame } from '../boardingpass/BoardingPassFrame';
-import { boundSlotCount, slotLayout, slotResourcePath } from '../boardingpass/passPresentation';
+import { BOARDING_PASS_PREVIEW_DIMENSION, boundSlotCount, sharedSlotQualityCrop, slotLayout, slotResourcePath } from '../boardingpass/passPresentation';
 import { buildFlightVisualTheme, createBlendedBackground } from '../theme/colors';
 import {
   airlineLabel,
@@ -134,7 +134,8 @@ export function FlightListView({ flights, airlineNames, airlines, onOpen, openLa
                     layout={slotLayout(flight, 'paperBoardingPassFront')}
                     compact
                     layered={false}
-                    maxDimension={128}
+                    maxDimension={BOARDING_PASS_PREVIEW_DIMENSION}
+                    qualityCrop={sharedSlotQualityCrop(flight, 'paperBoardingPassFront')}
                   />
                 </Box>
                 <Box data-testid="flight-list-paper-back-preview" sx={{ width: 58, flex: '0 0 auto', display: { xs: 'none', md: 'block' } }}>
@@ -144,7 +145,8 @@ export function FlightListView({ flights, airlineNames, airlines, onOpen, openLa
                     layout={slotLayout(flight, 'paperBoardingPassBack')}
                     compact
                     layered={false}
-                    maxDimension={128}
+                    maxDimension={BOARDING_PASS_PREVIEW_DIMENSION}
+                    qualityCrop={sharedSlotQualityCrop(flight, 'paperBoardingPassBack')}
                   />
                 </Box>
               </Box>

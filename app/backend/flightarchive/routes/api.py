@@ -13,7 +13,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from ..archive import ArchiveError, MAX_DOCUMENT_BYTES, parse_finite_json
-from ..thumbnail import ThumbnailError, parse_scale, validate_virtual_path
+from ..thumbnail import ThumbnailDisconnected, ThumbnailError, parse_scale, validate_virtual_path
 
 router = APIRouter(prefix="/api")
 
@@ -77,9 +77,11 @@ async def thumbnail(virtual_path: str, request: Request):
             if _etag_matches(validator, inspected.headers["ETag"]):
                 headers = {name: value for name, value in inspected.headers.items() if name.lower() != "content-length"}
                 return Response(status_code=304, headers=headers)
-            result = inspected if request.method == "HEAD" else await service.get(virtual_path, scale, scale_text)
+            result = inspected if request.method == "HEAD" else await service.get(virtual_path, scale, scale_text, request.is_disconnected)
         else:
-            result = await (service.head(virtual_path, scale, scale_text) if request.method == "HEAD" else service.get(virtual_path, scale, scale_text))
+            result = await (service.head(virtual_path, scale, scale_text) if request.method == "HEAD" else service.get(virtual_path, scale, scale_text, request.is_disconnected))
+    except ThumbnailDisconnected:
+        return Response(status_code=204)
     except ThumbnailError as exc:
         raise _thumbnail_error(exc) from exc
     response = Response(

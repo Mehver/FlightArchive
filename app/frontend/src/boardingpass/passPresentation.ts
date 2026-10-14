@@ -15,6 +15,9 @@
 
 import type { FlightRecord, PaperBoardingPassLayout } from '../api/types';
 
+/** Shared relay/render target for list, grid, and detail paper-pass previews. */
+export const BOARDING_PASS_PREVIEW_DIMENSION = 512;
+
 /** The paper boarding-pass slots that use crop-and-placement layouts. */
 export const BOARDING_PASS_SLOTS = [
   'paperBoardingPassFront',
@@ -36,6 +39,22 @@ export function slotResourcePath(flight: FlightRecord, slot: BoardingPassSlotKey
 
 export function slotLayout(flight: FlightRecord, slot: BoardingPassSlotKey): PaperBoardingPassLayout | undefined {
   return flight.paperBoardingPassLayouts?.[slot];
+}
+
+/** Highest detail-quality crop among paper slots sharing one virtual path. */
+export function sharedSlotQualityCrop(flight: FlightRecord, slot: BoardingPassSlotKey): { width: number; height: number } | undefined {
+  const path = slotResourcePath(flight, slot);
+  if (!path) return undefined;
+  let selected: { width: number; height: number } | undefined;
+  for (const candidate of BOARDING_PASS_SLOTS) {
+    if (slotResourcePath(flight, candidate) !== path) continue;
+    const crop = slotLayout(flight, candidate)?.crop;
+    if (!crop || !Number.isFinite(crop.width) || !Number.isFinite(crop.height) || crop.width <= 0 || crop.height <= 0) continue;
+    if (!selected || Math.max(crop.width, crop.height) < Math.max(selected.width, selected.height)) {
+      selected = { width: crop.width, height: crop.height };
+    }
+  }
+  return selected;
 }
 
 /**

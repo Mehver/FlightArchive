@@ -7,7 +7,7 @@ A containerized flight-history service:
 
 - serves the statically built React SPA in production,
 - exposes a documented JSON HTTP API under ``/api``,
-- persists business data atomically under the configured RFG data root,
+- persists opaque named JSON documents atomically per document under the configured RFG data root,
 - delegates resource cataloguing and mappings to RFG.
 """
 

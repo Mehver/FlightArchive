@@ -134,7 +134,7 @@ export function PaperBoardingPassStudio({
 }) {
   const business = useBusinessData();
   const { t } = useTranslation();
-  const { notify, showError } = useAppState();
+  const { notify, reportFailure } = useAppState();
   const dialogScale = useDialogScale();
   const resourcePath = flight[SLOT_ASSET_FIELD[slot]] as string | null;
   const existingLayout: PaperBoardingPassLayout | undefined = flight.paperBoardingPassLayouts?.[slot as 'paperBoardingPassFront' | 'paperBoardingPassBack'];
@@ -644,7 +644,7 @@ export function PaperBoardingPassStudio({
       onSaved(result);
       onClose();
     } catch (error) {
-      showError(error, t('studioSaveFailed'), { action: t('studioSave'), form: t('scanStudioTitle', { slot: t(SLOT_LABEL_KEY[slot]) }) });
+      reportFailure(error, { fallback: t('studioSaveFailed'), context: { action: t('studioSave'), form: t('scanStudioTitle', { slot: t(SLOT_LABEL_KEY[slot]) }) } });
     } finally {
       setSaving(false);
     }
@@ -662,7 +662,7 @@ export function PaperBoardingPassStudio({
       onSaved(result);
       onClose();
     } catch (error) {
-      showError(error, t('studioSaveFailed'), { action: t('studioClearLayout'), form: t('scanStudioTitle', { slot: t(SLOT_LABEL_KEY[slot]) }) });
+      reportFailure(error, { fallback: t('studioSaveFailed'), context: { action: t('studioClearLayout'), form: t('scanStudioTitle', { slot: t(SLOT_LABEL_KEY[slot]) }) } });
     } finally {
       setSaving(false);
     }

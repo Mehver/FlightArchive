@@ -671,6 +671,102 @@ def test_inspect_rejects_ignored_large_range_without_consuming_body(tmp_path):
     assert response.consumed is False
 
 
+def test_disconnected_heavy_waiter_never_fetches_or_renders():
+    import asyncio
+    from flightarchive.thumbnail import SourceIdentity, ThumbnailDisconnected, ThumbnailService
+
+    async def scenario():
+        service = object.__new__(ThumbnailService)
+        service._heavy_jobs = asyncio.Semaphore(0)
+        service._head_source = lambda _path: asyncio.sleep(0, result=SourceIdentity('"v1"', 10))
+        service._validated_cached = lambda *_args: asyncio.sleep(0, result=None)
+        source_get_calls = 0
+        render_calls = 0
+
+        async def source_get(*_args):
+            nonlocal source_get_calls
+            source_get_calls += 1
+            return b"source"
+
+        def render(*_args):
+            nonlocal render_calls
+            render_calls += 1
+            return b"rendered"
+
+        service._source_get = source_get
+        service._render = render
+        checks = 0
+
+        async def disconnected():
+            nonlocal checks
+            checks += 1
+            return checks > 1
+
+        with pytest.raises(ThumbnailDisconnected):
+            await service._get_once("queued.png", 0.5, "0.5", disconnected)
+        assert source_get_calls == 0
+        assert render_calls == 0
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_pillow_render_keeps_heavy_slot_until_thread_finishes():
+    import asyncio
+    import threading
+    from flightarchive.thumbnail import ImageGeometry, SourceIdentity, ThumbnailService
+
+    async def scenario():
+        service = object.__new__(ThumbnailService)
+        service._heavy_jobs = asyncio.Semaphore(1)
+        identity = SourceIdentity('"v1"', 10)
+        geometry = ImageGeometry(10, 10, 5, 5, "PNG")
+        service._head_source = lambda _path: asyncio.sleep(0, result=identity)
+        service._validated_cached = lambda *_args: asyncio.sleep(0, result=None)
+        service._inspect = lambda *_args: asyncio.sleep(0, result=geometry)
+        service._source_get = lambda *_args: asyncio.sleep(0, result=b"source")
+        service._cache = type("Cache", (), {"write": staticmethod(lambda *_args: None)})()
+        first_started = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        active = 0
+        maximum = 0
+        lock = threading.Lock()
+
+        def render(_payload, _geometry):
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+                ordinal = 1 if not first_started.is_set() else 2
+            if ordinal == 1:
+                first_started.set()
+                release_first.wait(2)
+            else:
+                second_started.set()
+            with lock:
+                active -= 1
+            return b"rendered"
+
+        service._render = render
+        first = asyncio.create_task(service._get_once("first.png", 0.5, "0.5", None))
+        assert await asyncio.to_thread(first_started.wait, 1)
+        first.cancel()
+        second = asyncio.create_task(service._get_once("second.png", 0.5, "0.5", None))
+        await asyncio.sleep(0.08)
+        assert not second_started.is_set()
+        first.cancel()
+        await asyncio.sleep(0.02)
+        assert not second_started.is_set()
+        release_first.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert await asyncio.to_thread(second_started.wait, 1)
+        await second
+        assert maximum == 1
+
+    asyncio.run(scenario())
+
+
 
 def test_thumbnail_rejects_cached_webp_header_dimension_mismatch(tmp_path, monkeypatch):
     cache = tmp_path / "cache"

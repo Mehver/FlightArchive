@@ -37,6 +37,7 @@ import {
   type FlightValidationField,
 } from './flightFormat';
 import { ResourceImage } from '../resources/ResourceImage';
+import { ImageRequestScope } from '../resources/ImageRequestScope';
 import { ResourcePickerDialog } from '../resources/ResourcePickerDialog';
 import { ResourceSlotField } from '../resources/ResourceSlotField';
 import { ScanStudioDialog, type BoardingPassSlot } from '../scanstudio/ScanStudioDialog';
@@ -278,6 +279,7 @@ export function FlightDialog({
       slotProps={{ paper: { sx: { maxHeight: '90vh', width: scaled(900, dialogScale), maxWidth: '95vw' } } }}
     >
       <DialogTitle id="flight-dialog-title">{initial ? t('editFlight') : t('addFlight')}</DialogTitle>
+      <ImageRequestScope active={open && !attachmentsOpen && studioSlot === null}>
       <Box component="form" noValidate onSubmit={handleSubmit}>
       <DialogContent dividers sx={{ overflow: 'auto', maxHeight: 'calc(90vh - 120px)' }}>
         <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, pt: 0.5 }}>
@@ -539,6 +541,7 @@ export function FlightDialog({
           </Button>
       </DialogActions>
       </Box>
+      </ImageRequestScope>
 
        <ResourcePickerDialog
         open={attachmentsOpen}

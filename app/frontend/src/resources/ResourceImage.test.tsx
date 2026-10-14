@@ -22,7 +22,6 @@ describe('ResourceImage', () => {
     render(<ResourceImage resourcePath="inbox/ticket.png" alt="ticket" />);
     const element = screen.getByAltText('ticket');
     expect(element.getAttribute('src')).toBe('blob:rendered-inbox/ticket.png');
-    expect(screen.getByRole('progressbar', { name: /loading/i })).toBeTruthy();
     fireEvent.load(element);
     expect(screen.queryByRole('progressbar', { name: /loading/i })).toBeNull();
   });
@@ -31,7 +30,6 @@ describe('ResourceImage', () => {
     render(<ResourceImage resourcePath="objects/logo.svg" alt="logo" />);
     const element = screen.getByAltText('logo');
     expect(element.getAttribute('src')).toBe('/res/objects/logo.svg');
-    expect(screen.getByRole('progressbar', { name: /loading/i })).toBeTruthy();
     fireEvent.load(element);
     expect(screen.queryByRole('progressbar', { name: /loading/i })).toBeNull();
   });

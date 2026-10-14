@@ -122,7 +122,7 @@ describe('browser image renderer relay cutover', () => {
     const result = await instance.render({ virtualPath: 'nested/large scan.jpg', crop, maxDimension: 1024 });
     expect(result).toMatchObject({ width: 1024, height: 418 });
     const urls = vi.mocked(fetcher).mock.calls.map(([url]) => String(url));
-    expect(urls).toEqual(['/api/thumbnails/nested/large%20scan.jpg?scale=0.015625', '/api/thumbnails/nested/large%20scan.jpg?scale=0.125']);
+    expect(urls).toEqual(['/api/thumbnails/nested/large%20scan.jpg?scale=0.015625', '/api/thumbnails/nested/large%20scan.jpg?scale=0.0625']);
     expect(urls.every((url) => !url.startsWith('/res/'))).toBe(true);
     expect(context.translate).toHaveBeenNthCalledWith(2, -crop.centerX, -crop.centerY);
     expect(context.drawImage).toHaveBeenCalledWith(expect.anything(), 0, 0, 14_000, 10_000);
@@ -146,6 +146,101 @@ describe('browser image renderer relay cutover', () => {
     expect(first.url).not.toBe(second.url);
     expect(vi.mocked(fetcher).mock.calls.filter(([, init]) => init?.method === 'GET')).toHaveLength(2);
     instance.release(first); expect(revokeObjectURL).toHaveBeenCalledWith(first.url); instance.dispose(); expect(revokeObjectURL).toHaveBeenCalledWith(second.url);
+  });
+
+  it('uses one detail-quality GET scale across output-size consumers of the same saved crop', async () => {
+    const fetcher = relayFetcher(14_000, 10_000, 500_000);
+    const { instance } = renderer(fetcher, 14_000, 10_000);
+    const crop = { centerX: 7000, centerY: 5000, width: 8000, height: 3000, rotationDegrees: 0 };
+    await instance.render({ virtualPath: 'shared.png', crop, maxDimension: 40 });
+    await instance.render({ virtualPath: 'shared.png', crop, maxDimension: 512 });
+    await instance.render({ virtualPath: 'shared.png', qualityCrop: crop, maxDimension: 80 });
+    const getScales = vi.mocked(fetcher).mock.calls.filter(([, init]) => init?.method === 'GET').map(([url]) => scaleFromUrl(url));
+    expect(getScales).toEqual([0.125, 0.125, 0.125]);
+  });
+
+  it('limits the complete display pipeline to two and removes an aborted queued render', async () => {
+    const controllers = [new AbortController(), new AbortController(), new AbortController()];
+    let active = 0; let maximum = 0;
+    const fetcher = vi.fn((_url: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      active += 1; maximum = Math.max(maximum, active);
+      init?.signal?.addEventListener('abort', () => { active -= 1; reject(new DOMException('Aborted', 'AbortError')); }, { once: true });
+    })) as unknown as typeof fetch;
+    const instance = renderer(fetcher).instance;
+    const pending = controllers.map((controller, index) => instance.render({ virtualPath: `${index}.png`, signal: controller.signal }));
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+    controllers[2].abort();
+    await expect(pending[2]).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(maximum).toBe(2);
+    controllers[0].abort(); controllers[1].abort();
+    await Promise.allSettled(pending.slice(0, 2));
+  });
+
+  it('releases gate slots while aborted native decodes settle and closes late bitmaps', async () => {
+    const fetcher = relayFetcher();
+    const controllers = [new AbortController(), new AbortController(), new AbortController()];
+    const decodeSettlers: Array<{ resolve(value: { source: CanvasImageSource; width: number; height: number; close(): void }): void; reject(error: unknown): void }> = [];
+    const lateClose = vi.fn(); const secondClose = vi.fn(); const currentClose = vi.fn();
+    let decodeCall = 0;
+    const createObjectURL = vi.fn(() => 'blob:current');
+    const context = { drawImage: vi.fn(), translate: vi.fn(), rotate: vi.fn(), scale: vi.fn() };
+    const instance = new BrowserImageRenderer({
+      fetcher,
+      decode: vi.fn(() => {
+        const index = decodeCall++;
+        if (index === 2) return Promise.resolve({ source: {} as CanvasImageSource, width: 800, height: 600, close: currentClose });
+        return new Promise<{ source: CanvasImageSource; width: number; height: number; close(): void }>((resolve, reject) => decodeSettlers.push({ resolve, reject }));
+      }),
+      makeCanvas: vi.fn((width: number, height: number) => ({ width, height, context, toBlob: async () => new Blob(['ready'], { type: 'image/webp' }) })),
+      createObjectURL,
+      revokeObjectURL: vi.fn(),
+    });
+    const requests = controllers.map((controller, index) => instance.render({ virtualPath: `decode-${index}.png`, signal: controller.signal }));
+    const oldOutcomes = requests.slice(0, 2).map((request) => request.then(() => null, (error: unknown) => error));
+    await vi.waitFor(() => expect(decodeSettlers).toHaveLength(2));
+    controllers[0].abort(); controllers[1].abort();
+    await expect(requests[2]).resolves.toMatchObject({ url: 'blob:current' });
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    decodeSettlers[0].resolve({ source: {} as CanvasImageSource, width: 800, height: 600, close: lateClose });
+    decodeSettlers[1].reject(new Error('late-decode-failure'));
+    await Promise.resolve(); await Promise.resolve();
+    expect(lateClose).toHaveBeenCalledOnce();
+    expect(secondClose).not.toHaveBeenCalled();
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    await expect(oldOutcomes[0]).resolves.toMatchObject({ name: 'AbortError' });
+    await expect(oldOutcomes[1]).resolves.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('releases gate slots while aborted canvas encodes settle and discards late blobs and failures', async () => {
+    const fetcher = relayFetcher();
+    const controllers = [new AbortController(), new AbortController(), new AbortController()];
+    const encodeSettlers: Array<{ resolve(value: Blob): void; reject(error: unknown): void }> = [];
+    const closes = [vi.fn(), vi.fn(), vi.fn()]; let decodeCall = 0; let canvasCall = 0;
+    const createObjectURL = vi.fn(() => 'blob:focused');
+    const context = { drawImage: vi.fn(), translate: vi.fn(), rotate: vi.fn(), scale: vi.fn() };
+    const instance = new BrowserImageRenderer({
+      fetcher,
+      decode: vi.fn(async () => ({ source: {} as CanvasImageSource, width: 800, height: 600, close: closes[decodeCall++] })),
+      makeCanvas: vi.fn((width: number, height: number) => {
+        const index = canvasCall++;
+        return { width, height, context, toBlob: index === 2 ? async () => new Blob(['focused'], { type: 'image/webp' }) : () => new Promise<Blob>((resolve, reject) => encodeSettlers.push({ resolve, reject })) };
+      }),
+      createObjectURL,
+      revokeObjectURL: vi.fn(),
+    });
+    const requests = controllers.map((controller, index) => instance.render({ virtualPath: `encode-${index}.png`, signal: controller.signal }));
+    const oldOutcomes = requests.slice(0, 2).map((request) => request.then(() => null, (error: unknown) => error));
+    await vi.waitFor(() => expect(encodeSettlers).toHaveLength(2));
+    controllers[0].abort(); controllers[1].abort();
+    await expect(requests[2]).resolves.toMatchObject({ url: 'blob:focused' });
+    expect(closes[0]).toHaveBeenCalledOnce(); expect(closes[1]).toHaveBeenCalledOnce();
+    encodeSettlers[0].resolve(new Blob(['late'], { type: 'image/webp' }));
+    encodeSettlers[1].reject(new Error('late-encode-failure'));
+    await Promise.resolve(); await Promise.resolve();
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    await expect(oldOutcomes[0]).resolves.toMatchObject({ name: 'AbortError' });
+    await expect(oldOutcomes[1]).resolves.toMatchObject({ name: 'AbortError' });
   });
 
   it('aborts relay waiting and does not publish a late URL', async () => {

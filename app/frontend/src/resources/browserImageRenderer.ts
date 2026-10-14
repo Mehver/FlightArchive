@@ -20,7 +20,14 @@ export interface RenderCrop {
   /** Old documents may contain corners. Rendering intentionally ignores them. */
   corners?: unknown;
 }
-export interface RenderRequest { virtualPath: string; crop?: RenderCrop; maxDimension?: number; signal?: AbortSignal }
+export interface RenderRequest {
+  virtualPath: string;
+  crop?: RenderCrop;
+  /** Saved-detail crop dimensions used only to select the relay derivative. */
+  qualityCrop?: Pick<RenderCrop, 'width' | 'height'>;
+  maxDimension?: number;
+  signal?: AbortSignal;
+}
 export interface RenderedImage { url: string; width: number; height: number; type: string }
 interface DecodedImage { source: CanvasImageSource; width: number; height: number; close(): void }
 interface RenderCanvas {
@@ -37,6 +44,7 @@ interface RendererDependencies {
   revokeObjectURL(url: string): void;
 }
 interface RenderedBlob { blob: Blob; width: number; height: number; type: string }
+interface QueuedRender<T> { signal?: AbortSignal; run(): Promise<T>; resolve(value: T): void; reject(error: unknown): void; removeAbort?(): void }
 interface ThumbnailMetadata {
   sourceWidth: number;
   sourceHeight: number;
@@ -128,6 +136,63 @@ export function assertDecodedLimits(width: number, height: number): void {
   if (!finitePositive(width) || !finitePositive(height) || width > MAX_DECODED_DIMENSION || height > MAX_DECODED_DIMENSION || width * height > MAX_DECODED_PIXELS) throw new Error('decoded-image-too-large');
 }
 function aborted(): DOMException { return new DOMException('The operation was aborted', 'AbortError'); }
+
+/** Stop accounting an aborted consumer immediately while safely observing the
+ * non-cancellable browser primitive until it settles. */
+function awaitBrowserPrimitive<T>(promise: Promise<T>, signal?: AbortSignal, disposeLate?: (value: T) => void): Promise<T> {
+  if (!signal) return promise;
+  return new Promise<T>((resolve, reject) => {
+    let finished = false;
+    const removeAbort = () => signal.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      if (finished) return;
+      finished = true;
+      removeAbort();
+      reject(aborted());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    void promise.then((value) => {
+      if (finished) { disposeLate?.(value); return; }
+      finished = true; removeAbort(); resolve(value);
+    }, (error: unknown) => {
+      if (finished) return; // Observed late rejection after consumer abort.
+      finished = true; removeAbort(); reject(error);
+    });
+  });
+}
+
+const DISPLAY_RENDER_CONCURRENCY = 2;
+let activeDisplayRenders = 0;
+const displayRenderQueue: QueuedRender<unknown>[] = [];
+
+function drainDisplayRenderQueue(): void {
+  while (activeDisplayRenders < DISPLAY_RENDER_CONCURRENCY && displayRenderQueue.length > 0) {
+    const job = displayRenderQueue.shift()!;
+    job.removeAbort?.();
+    if (job.signal?.aborted) { job.reject(aborted()); continue; }
+    activeDisplayRenders += 1;
+    void job.run().then(job.resolve, job.reject).finally(() => { activeDisplayRenders -= 1; drainDisplayRenderQueue(); });
+  }
+}
+
+function gateDisplayRender<T>(signal: AbortSignal | undefined, run: () => Promise<T>): Promise<T> {
+  if (signal?.aborted) return Promise.reject(aborted());
+  return new Promise<T>((resolve, reject) => {
+    const job: QueuedRender<T> = { signal, run, resolve, reject };
+    const cancelQueued = () => {
+      const index = displayRenderQueue.indexOf(job as QueuedRender<unknown>);
+      if (index < 0) return;
+      displayRenderQueue.splice(index, 1); job.removeAbort?.(); reject(aborted());
+    };
+    if (signal) {
+      signal.addEventListener('abort', cancelQueued, { once: true });
+      job.removeAbort = () => signal.removeEventListener('abort', cancelQueued);
+    }
+    displayRenderQueue.push(job as QueuedRender<unknown>);
+    drainDisplayRenderQueue();
+  });
+}
 function transportFailure(error: unknown, signal?: AbortSignal): never {
   if (signal?.aborted || error instanceof DOMException && error.name === 'AbortError') throw aborted();
   if (error instanceof ResourceFetchError) throw error;
@@ -251,10 +316,21 @@ export class BrowserImageRenderer {
     const maxDimension = request.maxDimension ?? DEFAULT_RENDER_DIMENSION;
     if (!finitePositive(maxDimension)) throw new Error('invalid-max-dimension');
     if (request.signal?.aborted) throw aborted();
+    return gateDisplayRender(request.signal, () => this.renderPipeline(request, maxDimension));
+  }
+
+  private async renderPipeline(request: RenderRequest, maxDimension: number): Promise<RenderedImage> {
     const preflight = await fetchResource(this.dependencies.fetcher, thumbnailUrl(request.virtualPath, METADATA_SCALE), { method: 'HEAD', signal: request.signal }, request.signal);
     const source = metadata(preflight, METADATA_SCALE); if (request.signal?.aborted) throw aborted();
     if (request.crop && !validateRenderBounds(request.crop, source.sourceWidth, source.sourceHeight)) throw new Error('invalid-crop-rectangle');
-    const scale = selectThumbnailScale({ sourceWidth: source.sourceWidth, sourceHeight: source.sourceHeight, sourceBytes: source.sourceBytes, crop: request.crop, maxDimension });
+    const quality = request.qualityCrop ?? request.crop ?? { width: source.sourceWidth, height: source.sourceHeight };
+    const scale = selectThumbnailScale({
+      sourceWidth: source.sourceWidth,
+      sourceHeight: source.sourceHeight,
+      sourceBytes: source.sourceBytes,
+      qualityWidth: quality.width,
+      qualityHeight: quality.height,
+    });
     const result = await this.renderFresh(request.virtualPath, source, scale, request.crop, maxDimension, request.signal);
     if (request.signal?.aborted) throw aborted();
     return this.issue(result);
@@ -266,7 +342,8 @@ export class BrowserImageRenderer {
     const response = await fetchResource(this.dependencies.fetcher, thumbnailUrl(path, scale), { method: 'GET', signal }, signal);
     const actual = metadata(response, scale);
     if (actual.sourceWidth !== source.sourceWidth || actual.sourceHeight !== source.sourceHeight || actual.sourceBytes !== source.sourceBytes || actual.sourceEtag !== source.sourceEtag) throw new Error('thumbnail-source-changed');
-    const blob = await boundedBlob(response, MAX_THUMBNAIL_BYTES, signal); const decoded = await this.dependencies.decode(blob);
+    const blob = await boundedBlob(response, MAX_THUMBNAIL_BYTES, signal);
+    const decoded = await awaitBrowserPrimitive(this.dependencies.decode(blob), signal, (late) => late.close());
     try {
       if (signal?.aborted) throw aborted();
       if (decoded.width !== actual.thumbnailWidth || decoded.height !== actual.thumbnailHeight) throw new Error('thumbnail-dimensions-mismatch');
@@ -280,7 +357,7 @@ export class BrowserImageRenderer {
         // The relay is already EXIF-normalized. Paint its small bitmap into the original logical coordinate system.
         canvas.context.drawImage(decoded.source, 0, 0, source.sourceWidth, source.sourceHeight);
       } else canvas.context.drawImage(decoded.source, 0, 0, width, height);
-      const output = await canvas.toBlob(); if (signal?.aborted) throw aborted();
+      const output = await awaitBrowserPrimitive(canvas.toBlob(), signal); if (signal?.aborted) throw aborted();
       if (output.type !== 'image/webp' && output.type !== 'image/png') throw new Error('unsupported-canvas-output');
       return { blob: output, width, height, type: output.type };
     } finally { decoded.close(); }

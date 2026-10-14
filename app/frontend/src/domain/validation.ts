@@ -30,6 +30,9 @@ export function isSafeResourcePath(value: string): boolean {
 export function assertStableResourcePath(value: string | null, label: string): void {
   if (value !== null && (!isSafeResourcePath(value) || value.startsWith('inbox/') || value.startsWith('ignore/'))) throw new DomainValidationError([`${label} must reference a stable safe resource path`]);
 }
+export function assertDraftResourcePath(value: string | null, label: string): void {
+  if (value !== null && (!isSafeResourcePath(value) || value.startsWith('ignore/'))) throw new DomainValidationError([`${label} must reference a stable or inbox resource path`]);
+}
 function finiteBetween(value: unknown, low: number, high: number, label: string): asserts value is number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < low || value > high) throw new DomainValidationError([`${label} must be a finite number in ${low}..${high}`]);
 }

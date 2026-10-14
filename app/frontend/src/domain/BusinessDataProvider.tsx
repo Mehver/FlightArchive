@@ -31,7 +31,9 @@ import {
   type BusinessDataDocuments,
 } from './archiveV2';
 import { parseBusinessDataV1 } from './schemaV1';
+import { referencesByResource } from './resourceReferences';
 import type { AircraftType, Airline, Airport, BusinessData, CatalogKind, FlightRecord } from './types';
+import { useOptionalFeedback } from '../feedback/FeedbackCenter';
 
 export type ArchiveJsonValue = null | boolean | number | string | ArchiveJsonValue[] | { [key: string]: ArchiveJsonValue };
 
@@ -69,6 +71,18 @@ export interface SaveAllProgress {
 
 type CatalogEntry = Airline | Airport | AircraftType;
 
+export interface PreparedBusinessMutation<T> {
+  before: BusinessData;
+  next: BusinessData;
+  result: T;
+}
+
+export class PreparedCommitError extends Error {
+  constructor(message: string, public readonly rollbackFailedDocs: BusinessDataDocumentId[], options?: ErrorOptions) {
+    super(message, options); this.name = 'PreparedCommitError';
+  }
+}
+
 export interface BusinessDataContextValue {
   phase: 'loading' | 'ready' | 'error';
   data: BusinessData | null;
@@ -81,6 +95,12 @@ export interface BusinessDataContextValue {
   upsertCatalogEntry(kind: CatalogKind, key: string, changes: unknown): CatalogEntry;
   deleteCatalogEntries(kind: CatalogKind, keys: readonly string[], force?: boolean): CatalogEntry[];
   updateSettings(settings: unknown): Record<string, string>;
+  prepareCreateFlight(input: unknown): PreparedBusinessMutation<FlightRecord>;
+  prepareUpdateFlight(id: string, changes: unknown): PreparedBusinessMutation<FlightRecord>;
+  prepareDeleteFlight(id: string): PreparedBusinessMutation<FlightRecord>;
+  prepareUpsertCatalogEntry(kind: CatalogKind, key: string, changes: unknown): PreparedBusinessMutation<CatalogEntry>;
+  prepareDeleteCatalogEntries(kind: CatalogKind, keys: readonly string[], force?: boolean): PreparedBusinessMutation<CatalogEntry[]>;
+  commitPrepared<T>(mutation: PreparedBusinessMutation<T>): Promise<T>;
   retryDocument(documentId: BusinessDataDocumentId): Promise<DocumentSaveResult>;
   saveDocument(documentId: BusinessDataDocumentId): Promise<DocumentSaveResult>;
   saveAll(): Promise<SaveAllResult>;
@@ -89,6 +109,7 @@ export interface BusinessDataContextValue {
   downloadBusinessData(filename?: string): void;
   reload(options?: { discardChanges?: boolean }): Promise<void>;
   whenIdle(): Promise<void>;
+  hasResourceReferences(paths: readonly string[]): boolean;
 }
 
 export class DirtyBusinessDataError extends Error {
@@ -111,17 +132,6 @@ const DEFAULT_TRANSPORT: ArchiveTransport = {
 
 function errorFrom(reason: unknown): Error {
   return reason instanceof Error ? reason : new Error(String(reason));
-}
-
-function reportPersistenceFailure(documentId: string, error: Error): void {
-  void api.reportActivity({
-    source: 'frontend-business-data',
-    kind: 'persistence',
-    severity: 'error',
-    state: 'failed',
-    code: 'archive-document-save-failed',
-    details: { documentId, message: error.message },
-  }).catch(() => undefined);
 }
 
 function cleanDocumentStates(): Record<BusinessDataDocumentId, DocumentPersistenceState> {
@@ -151,6 +161,7 @@ export function BusinessDataProvider({
   transport?: ArchiveTransport;
   dependencies?: CommandDependencies;
 }) {
+  const reportFailure = useOptionalFeedback()?.reportFailure;
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [data, setData] = useState<BusinessData | null>(null);
   const [loadError, setLoadError] = useState<Error | null>(null);
@@ -160,6 +171,9 @@ export function BusinessDataProvider({
   const documentsRef = useRef(documents);
   const queueRef = useRef<Promise<void>>(Promise.resolve());
   const queueActivityRef = useRef(0);
+  const mountedRef = useRef(true);
+  const startupStartedRef = useRef(false);
+  const loadGenerationRef = useRef(0);
 
   const replaceDocumentState = useCallback((documentId: BusinessDataDocumentId, update: (current: DocumentPersistenceState) => DocumentPersistenceState) => {
     const next = { ...documentsRef.current, [documentId]: update(documentsRef.current[documentId]) };
@@ -173,7 +187,7 @@ export function BusinessDataProvider({
     return result;
   }, []);
 
-  const enqueueDocument = useCallback((documentId: BusinessDataDocumentId, snapshot: unknown, generation: number): Promise<DocumentSaveResult> => {
+  const enqueueDocument = useCallback((documentId: BusinessDataDocumentId, snapshot: unknown, generation: number, publishFailure = true): Promise<DocumentSaveResult> => {
     const persistedSnapshot = structuredClone(snapshot) as ArchiveJsonValue;
     queueActivityRef.current += 1;
     replaceDocumentState(documentId, (state) => ({ ...state, pending: state.pending + 1 }));
@@ -190,18 +204,29 @@ export function BusinessDataProvider({
         replaceDocumentState(documentId, (state) => state.generation === generation
           ? { ...state, dirty: true, error }
           : state);
-        reportPersistenceFailure(documentId, error);
+        if (publishFailure) reportFailure?.(error, {
+          code: 'archive-document-save-failed',
+          activity: {
+            source: 'frontend-business-data', kind: 'persistence', severity: 'error', state: 'failed', code: 'archive-document-save-failed',
+            details: { documentId, message: error.message },
+          },
+        });
         throw error;
       } finally {
         replaceDocumentState(documentId, (state) => ({ ...state, pending: Math.max(0, state.pending - 1), saving: state.pending > 1 }));
       }
     });
-  }, [enqueueWork, replaceDocumentState, transport]);
+  }, [enqueueWork, replaceDocumentState, reportFailure, transport]);
 
   const requireWorking = useCallback((): BusinessData => {
     if (!workingRef.current) throw new Error('business data is not loaded');
     return workingRef.current;
   }, []);
+
+  const hasResourceReferences = useCallback((paths: readonly string[]) => {
+    const references = referencesByResource(requireWorking());
+    return paths.some((path) => (references.get(path)?.length ?? 0) > 0);
+  }, [requireWorking]);
 
   const applyCommand = useCallback((next: BusinessData, affected: readonly BusinessDataDocumentId[]) => {
     workingRef.current = next;
@@ -259,6 +284,82 @@ export function BusinessDataProvider({
     return next.settings;
   }, [applyCommand, requireWorking]);
 
+  const prepareCreateFlight = useCallback((input: unknown): PreparedBusinessMutation<FlightRecord> => {
+    const before = requireWorking(); const next = createFlightCommand(before, input, dependencies, { inboxDraft: true });
+    return { before, next, result: next.flights.at(-1)! };
+  }, [dependencies, requireWorking]);
+  const prepareUpdateFlight = useCallback((id: string, changes: unknown): PreparedBusinessMutation<FlightRecord> => {
+    const before = requireWorking(); const next = updateFlightCommand(before, id, changes, dependencies, { inboxDraft: true });
+    return { before, next, result: next.flights.find((flight) => flight.id === id)! };
+  }, [dependencies, requireWorking]);
+  const prepareDeleteFlight = useCallback((id: string): PreparedBusinessMutation<FlightRecord> => {
+    const before = requireWorking(); const deleted = before.flights.find((flight) => flight.id === id);
+    if (!deleted) { deleteFlightCommand(before, id); throw new Error('unreachable'); }
+    return { before, next: deleteFlightCommand(before, id), result: deleted };
+  }, [requireWorking]);
+  const prepareUpsertCatalogEntry = useCallback((kind: CatalogKind, key: string, changes: unknown): PreparedBusinessMutation<CatalogEntry> => {
+    const before = requireWorking(); const next = upsertCatalogEntryCommand(before, kind, key, changes, { inboxDraft: true });
+    const normalizedKey = key.trim().toUpperCase();
+    return { before, next, result: catalogEntries(next, kind).find((entry) => ('code' in entry ? entry.code : entry.icao) === normalizedKey)! };
+  }, [requireWorking]);
+  const prepareDeleteCatalogEntries = useCallback((kind: CatalogKind, keys: readonly string[], force = false): PreparedBusinessMutation<CatalogEntry[]> => {
+    const before = requireWorking(); const normalized = new Set(keys.map((key) => key.trim().toUpperCase()));
+    const result = catalogEntries(before, kind).filter((entry) => normalized.has('code' in entry ? entry.code : entry.icao));
+    return { before, next: deleteCatalogEntriesCommand(before, kind, keys, force), result };
+  }, [requireWorking]);
+
+  const commitPrepared = useCallback(async <T,>(mutation: PreparedBusinessMutation<T>): Promise<T> => {
+    // Prepared mutations may temporarily carry confirmed inbox selections, but
+    // coordination must retarget every one before persistence.
+    parseBusinessDataV1(mutation.next);
+    const beforeDocuments = splitBusinessData(mutation.before), nextDocuments = splitBusinessData(mutation.next);
+    const affected = BUSINESS_DATA_DOCUMENT_IDS.filter((id) => JSON.stringify(beforeDocuments[id]) !== JSON.stringify(nextDocuments[id]));
+    if (!affected.length) return mutation.result;
+    queueActivityRef.current += 1;
+    for (const documentId of affected) replaceDocumentState(documentId, (state) => ({ ...state, pending: state.pending + 1 }));
+    await enqueueWork(async () => {
+      const initialStates = Object.fromEntries(affected.map((id) => [id, documentsRef.current[id]])) as Partial<Record<BusinessDataDocumentId, DocumentPersistenceState>>;
+      const attempted: BusinessDataDocumentId[] = [];
+      for (const documentId of affected) replaceDocumentState(documentId, (state) => ({ ...state, saving: true }));
+      try {
+        if (workingRef.current !== mutation.before) throw new Error('business data changed while the operation was queued');
+        for (const documentId of affected) {
+          attempted.push(documentId);
+          await transport.putArchiveDocument(APP_ID, documentId, structuredClone(nextDocuments[documentId]) as ArchiveJsonValue);
+          if (workingRef.current !== mutation.before) throw new Error('business data changed while the prepared operation was saving');
+        }
+        if (workingRef.current !== mutation.before) throw new Error('business data changed before the prepared operation could publish');
+        workingRef.current = mutation.next; setData(mutation.next);
+        for (const documentId of affected) {
+          const initial = initialStates[documentId]!;
+          replaceDocumentState(documentId, (state) => ({
+            ...state,
+            // The exact prepared snapshot was confirmed written and no
+            // competing working aggregate was allowed to publish. A previous
+            // failure on this document is therefore resolved by this save.
+            dirty: false,
+            error: null,
+            generation: Math.max(state.generation, initial.generation) + 1,
+          }));
+        }
+      } catch (reason) {
+        const error = errorFrom(reason);
+        const rollbackFailedDocs: BusinessDataDocumentId[] = [];
+        for (const documentId of [...attempted].reverse()) {
+          try { await transport.putArchiveDocument(APP_ID, documentId, structuredClone(beforeDocuments[documentId]) as ArchiveJsonValue); }
+          catch (rollbackReason) {
+            const rollbackError = errorFrom(rollbackReason); rollbackFailedDocs.push(documentId);
+            replaceDocumentState(documentId, (state) => ({ ...state, dirty: true, error: rollbackError }));
+          }
+        }
+        throw new PreparedCommitError(error.message, rollbackFailedDocs, { cause: error });
+      } finally {
+        for (const documentId of affected) replaceDocumentState(documentId, (state) => ({ ...state, pending: Math.max(0, state.pending - 1), saving: state.pending > 1 }));
+      }
+    });
+    return mutation.result;
+  }, [enqueueWork, replaceDocumentState, transport]);
+
   const retryDocument = useCallback((documentId: BusinessDataDocumentId) => {
     const snapshot = splitBusinessData(requireWorking())[documentId];
     const generation = documentsRef.current[documentId].generation;
@@ -283,7 +384,7 @@ export function BusinessDataProvider({
     setSaveAllProgress({ status: 'running', completed: 0, total: 5, failed: [] });
     const writes = BUSINESS_DATA_DOCUMENT_IDS.map((documentId) => {
       const generation = documentsRef.current[documentId].generation;
-      return enqueueDocument(documentId, snapshots[documentId], generation).then(
+      return enqueueDocument(documentId, snapshots[documentId], generation, false).then(
         () => ({ documentId, ok: true as const }),
         () => ({ documentId, ok: false as const }),
       ).then((result) => {
@@ -336,6 +437,7 @@ export function BusinessDataProvider({
     if (options.discardChanges) await queueRef.current;
     const generations = BUSINESS_DATA_DOCUMENT_IDS.map((id) => documentsRef.current[id].generation);
     const queueActivity = queueActivityRef.current;
+    const loadGeneration = ++loadGenerationRef.current;
     setPhase('loading');
     setLoadError(null);
     try {
@@ -350,6 +452,7 @@ export function BusinessDataProvider({
       }
       const split = Object.fromEntries(BUSINESS_DATA_DOCUMENT_IDS.map((id, index) => [id, values[index]])) as BusinessDataDocuments;
       const loaded = aggregateBusinessData(split);
+      if (!mountedRef.current || loadGeneration !== loadGenerationRef.current) return;
       const clean = cleanDocumentStates();
       documentsRef.current = clean;
       setDocuments(clean);
@@ -358,23 +461,40 @@ export function BusinessDataProvider({
       setPhase('ready');
     } catch (reason) {
       const error = errorFrom(reason);
+      if (!mountedRef.current || loadGeneration !== loadGenerationRef.current) throw error;
       setLoadError(error);
       setPhase('error');
+      if (!(error instanceof DirtyBusinessDataError)) reportFailure?.(error, {
+        code: 'archive-load-failed',
+        activity: {
+          source: 'frontend-business-data', kind: 'persistence', severity: 'error', state: 'failed', code: 'archive-load-failed',
+          details: { operation: 'load' },
+        },
+      });
       throw error;
     }
-  }, [transport]);
+  }, [reportFailure, transport]);
 
-  useEffect(() => { void reload().catch(() => undefined); }, [reload]);
+  useEffect(() => {
+    mountedRef.current = true;
+    if (!startupStartedRef.current) {
+      startupStartedRef.current = true;
+      void reload().catch(() => undefined);
+    }
+    return () => { mountedRef.current = false; };
+  }, [reload]);
 
   const value = useMemo<BusinessDataContextValue>(() => ({
     phase, data, loadError, documents, saveAllProgress,
     createFlight, updateFlight, deleteFlight, upsertCatalogEntry, deleteCatalogEntries, updateSettings,
-    retryDocument, saveDocument, saveAll, importBusinessData, exportBusinessData, downloadBusinessData, reload,
+    prepareCreateFlight, prepareUpdateFlight, prepareDeleteFlight, prepareUpsertCatalogEntry, prepareDeleteCatalogEntries, commitPrepared,
+    retryDocument, saveDocument, saveAll, importBusinessData, exportBusinessData, downloadBusinessData, reload, hasResourceReferences,
     whenIdle: () => queueRef.current,
   }), [
     createFlight, data, deleteCatalogEntries, deleteFlight, documents, downloadBusinessData, exportBusinessData,
-    importBusinessData, loadError, phase, reload, retryDocument, saveDocument, saveAll, saveAllProgress, updateFlight,
-    updateSettings, upsertCatalogEntry,
+    hasResourceReferences, importBusinessData, loadError, phase, reload, retryDocument, saveDocument, saveAll, saveAllProgress, updateFlight,
+    updateSettings, upsertCatalogEntry, prepareCreateFlight, prepareUpdateFlight, prepareDeleteFlight,
+    prepareUpsertCatalogEntry, prepareDeleteCatalogEntries, commitPrepared,
   ]);
 
   return <BusinessDataContext.Provider value={value}>{children}</BusinessDataContext.Provider>;

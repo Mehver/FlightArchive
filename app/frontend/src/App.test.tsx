@@ -41,6 +41,12 @@ function businessValue(): BusinessDataContextValue {
     upsertCatalogEntry: vi.fn(),
     deleteCatalogEntries: vi.fn(),
     updateSettings: vi.fn(),
+    prepareCreateFlight: vi.fn(),
+    prepareUpdateFlight: vi.fn(),
+    prepareDeleteFlight: vi.fn(),
+    prepareUpsertCatalogEntry: vi.fn(),
+    prepareDeleteCatalogEntries: vi.fn(),
+    commitPrepared: vi.fn(),
     retryDocument: vi.fn(),
     saveDocument: vi.fn(),
     saveAll: vi.fn(async () => ({ failed: [] })),
@@ -49,11 +55,13 @@ function businessValue(): BusinessDataContextValue {
     downloadBusinessData: vi.fn(),
     reload: vi.fn(),
     whenIdle: vi.fn(),
+    hasResourceReferences: vi.fn(() => false),
   };
 }
 
 let business: BusinessDataContextValue;
 const showError = vi.fn();
+const reportFailure = vi.fn();
 
 function renderActions() {
   return render(<LanguageProvider><BusinessDataActions /></LanguageProvider>);
@@ -76,6 +84,7 @@ beforeEach(() => {
     refreshAll: vi.fn(),
     notify: vi.fn(),
     showError,
+    reportFailure,
     observedActivityRevision: null,
     lastReadActivityRevision: null,
     hasUnreadActivity: false,
@@ -86,6 +95,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   showError.mockReset();
+  reportFailure.mockReset();
   vi.clearAllMocks();
 });
 
@@ -165,8 +175,8 @@ describe('BusinessDataActions', () => {
 
     fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [file] } });
 
-    await waitFor(() => expect(showError).toHaveBeenCalledTimes(1));
-    expect(showError.mock.calls[0][0]).toBeInstanceOf(SyntaxError);
+    await waitFor(() => expect(reportFailure).toHaveBeenCalledTimes(1));
+    expect(reportFailure.mock.calls[0][0]).toBeInstanceOf(SyntaxError);
     expect(business.importBusinessData).not.toHaveBeenCalled();
   });
 
@@ -179,10 +189,9 @@ describe('BusinessDataActions', () => {
 
     fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [file] } });
 
-    await waitFor(() => expect(showError).toHaveBeenCalledWith(
+    await waitFor(() => expect(reportFailure).toHaveBeenCalledWith(
       validationError,
-      'Could Not Import Business Data',
-      { form: 'business-data-import' },
+      { fallback: 'Could Not Import Business Data', context: { form: 'business-data-import' } },
     ));
   });
 

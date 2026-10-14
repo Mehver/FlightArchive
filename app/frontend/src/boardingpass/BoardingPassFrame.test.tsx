@@ -52,7 +52,6 @@ describe('BoardingPassFrame', () => {
     renderFrame(<BoardingPassFrame slot="paperBoardingPassBack" resourcePath="obj/scan.png" layout={undefined} />);
     const img = screen.getByAltText(/paper back/i);
     expect(img.getAttribute('src')).toBe('blob:thumbnail-obj/scan.png');
-    expect(screen.getByRole('progressbar', { name: /loading/i })).not.toBeNull();
     fireEvent.load(img);
     expect(screen.queryByRole('progressbar', { name: /loading/i })).toBeNull();
     expect(screen.getByText(/unprepared scan/i)).not.toBeNull();
@@ -79,9 +78,16 @@ describe('BoardingPassFrame', () => {
 
 
 
-  it('passes an explicit preview dimension through to prepared rendering', () => {
+  it('keeps the saved crop quality reference when a card requests a smaller output canvas', () => {
     renderFrame(<BoardingPassFrame slot="paperBoardingPassFront" resourcePath="obj/scan.png" layout={LAYOUT} maxDimension={128} />);
-    expect(mockUseBrowserImage).toHaveBeenCalledWith('obj/scan.png', expect.objectContaining({ maxDimension: 128 }));
+    expect(mockUseBrowserImage).toHaveBeenCalledWith('obj/scan.png', expect.objectContaining({ crop: LAYOUT.crop, maxDimension: 128 }));
+  });
+
+  it('passes front and back saved-slot quality inputs independently of their presentation surface', () => {
+    renderFrame(<BoardingPassFrame slot="paperBoardingPassFront" resourcePath="obj/front.png" layout={LAYOUT} />);
+    renderFrame(<BoardingPassFrame slot="paperBoardingPassBack" resourcePath="obj/back.png" layout={undefined} />);
+    expect(mockUseBrowserImage).toHaveBeenCalledWith('obj/front.png', expect.objectContaining({ maxDimension: 512, crop: LAYOUT.crop }));
+    expect(mockUseBrowserImage).toHaveBeenCalledWith('obj/back.png', expect.objectContaining({ maxDimension: 512 }));
   });
 
   it('shows a graceful broken-image state when the thumbnail fails', () => {

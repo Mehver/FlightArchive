@@ -73,6 +73,31 @@ def test_rfg_child_lifespan_public_http_and_spa_order(tmp_path):
         assert client.get("/client/route").text == "<html>FlightArchive</html>"
 
 
+def test_rfg_public_http_preserves_and_renames_mapping_for_absent_source(tmp_path):
+    application, _ = _app(tmp_path)
+    original = {"entries": [{
+        "virtual_path": "objects/missing.txt",
+        "local_path": "source-is-absent.txt",
+        "size_bytes": 17,
+        "sha256": "remembered",
+    }]}
+    renamed = {"entries": [{
+        **original["entries"][0],
+        "virtual_path": "resources/flight/example/missing.txt",
+    }]}
+
+    with TestClient(application) as client:
+        catalog = client.get("/api/v1/meta/local")
+        assert catalog.status_code == 200
+        assert "source-is-absent.txt" not in {
+            item["local_path"] for item in catalog.json()["local_files"]
+        }
+        assert client.put("/api/v1/meta/map", json=original).status_code == 200
+        assert client.get("/api/v1/meta/map").json() == original
+        assert client.put("/api/v1/meta/map", json=renamed).status_code == 200
+        assert client.get("/api/v1/meta/map").json() == renamed
+
+
 def test_runtime_never_reads_or_writes_legacy_v1(tmp_path):
     application, runtime = _app(tmp_path)
     legacy = runtime / "flightarchive" / "v1" / "business-data.json"

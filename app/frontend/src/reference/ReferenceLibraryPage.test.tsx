@@ -57,7 +57,7 @@ const FLIGHTS = [
 ];
 
 function completeFlight(flight: Partial<FlightRecord>, index: number): FlightRecord {
-  return {
+  const defaults: FlightRecord = {
     id: flight.id ?? `flight-${index + 1}`, flightNumber: flight.flightNumber ?? String(index + 1),
     airlineCode: flight.airlineCode ?? 'CA', departureAirport: flight.departureAirport ?? 'PEK', arrivalAirport: flight.arrivalAirport ?? 'SHA',
     departureTerminal: null, arrivalTerminal: null, departureDate: flight.departureDate ?? '2026-01-01', departureTime: flight.departureTime ?? null,
@@ -65,6 +65,7 @@ function completeFlight(flight: Partial<FlightRecord>, index: number): FlightRec
     createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', paperBoardingPassFrontResourcePath: null,
     paperBoardingPassBackResourcePath: null, electronicBoardingPassResourcePath: null, attachmentResourcePaths: [], boardingPassColor: null,
   };
+  return { ...defaults, ...flight, id: flight.id ?? defaults.id };
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -226,6 +227,38 @@ describe('ReferenceLibraryPage sorting', () => {
 });
 
 describe('ReferenceLibraryPage selection', () => {
+  it('shift-selects the inclusive catalog range in current sorted order and supports reverse ranges', async () => {
+    mockBackend(); renderPage(); await firstRowVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Code, ascending' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select MU' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select CA' }), { shiftKey: true });
+    expect(screen.getByRole('button', { name: /delete selected \(3\)/i })).toBeTruthy();
+    for (const key of ['CA', 'CZ', 'MU']) expect((screen.getByRole('checkbox', { name: `Select ${key}` }) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('falls back to a normal toggle when a filtered view no longer contains the anchor', async () => {
+    mockBackend(); renderPage(); await firstRowVisible();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select CA' }));
+    fireEvent.change(screen.getByLabelText(/search flight reference entries/i), { target: { value: 'eastern' } });
+    await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'Select CA' })).toBeNull());
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select MU' }), { shiftKey: true });
+    expect(screen.getByRole('button', { name: /delete selected \(2\)/i })).toBeTruthy();
+    expect(screen.queryByRole('checkbox', { name: 'Select CZ' })).toBeNull();
+  });
+
+  it('shift-selects flights using their rendered sorted order', async () => {
+    const flights = [
+      completeFlight({ id: 'f10', flightNumber: '10', departureDate: '2026-01-01' }, 0),
+      completeFlight({ id: 'f2', flightNumber: '2', departureDate: '2026-01-02' }, 1),
+      completeFlight({ id: 'f30', flightNumber: '30', departureDate: '2026-01-03' }, 2),
+    ];
+    mockBackend({ flights }); renderPage(); await screen.findByRole('table', { name: 'Flights' });
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Flight Number, ascending' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select f2' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select f30' }), { shiftKey: true });
+    expect(screen.getByRole('button', { name: /delete selected \(3\)/i })).toBeTruthy();
+  });
+
   it('renders an accessible checkbox per row plus the select-all-visible header checkbox', async () => {
     mockBackend();
     renderPage();
@@ -278,6 +311,16 @@ describe('ReferenceLibraryPage selection', () => {
 });
 
 describe('ReferenceLibraryPage batch deletion', () => {
+  it('guards a confirmation against duplicate submit before the busy render commits', async () => {
+    const { updateCalls } = mockBackend(); renderPage();
+    const table = await screen.findByRole('table', { name: 'Flights' });
+    const row = within(table).getAllByRole('row')[1];
+    fireEvent.click(within(row).getByRole('button', { name: 'Delete Flight' }));
+    const confirm = within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete' });
+    fireEvent.click(confirm); fireEvent.click(confirm);
+    await waitFor(() => expect(updateCalls.filter((call) => call.url.endsWith('/flights.json'))).toHaveLength(1));
+  });
+
   it('deletes the selection only after explicit confirmation, then clears it', async () => {
     const { batchCalls } = mockBackend();
     renderPage();
@@ -339,7 +382,7 @@ describe('ReferenceLibraryPage single-row behavior', () => {
 });
 
 describe('ReferenceLibraryPage local flight persistence', () => {
-  it('retains a failed create as the editing record so Save retries without creating a duplicate', async () => {
+  it('keeps a failed create as an uncommitted draft so Save retries without creating a duplicate', async () => {
     const { updateCalls } = mockBackend({ failFirstFlightsPut: true });
     renderPage();
     await screen.findByRole('table', { name: 'Flights' });
@@ -353,14 +396,14 @@ describe('ReferenceLibraryPage local flight persistence', () => {
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(updateCalls.filter((call) => call.url.endsWith('/flights.json'))).toHaveLength(1));
-    await screen.findByRole('dialog', { name: 'Edit Flight' });
+    await screen.findByRole('dialog', { name: 'Add Flight' });
 
-    fireEvent.click(within(screen.getByRole('dialog', { name: 'Edit Flight' })).getByRole('button', { name: 'Save' }));
-    await screen.findByText('Flight updated.');
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Add Flight' })).getByRole('button', { name: 'Save' }));
+    await screen.findByText('Flight added.');
 
     const flightWrites = updateCalls.filter((call) => call.url.endsWith('/flights.json')).map((call) => call.body as unknown[]);
-    expect(flightWrites).toHaveLength(2);
-    expect(flightWrites.map((body) => body.length)).toEqual([FLIGHTS.length + 1, FLIGHTS.length + 1]);
+    expect(flightWrites).toHaveLength(3);
+    expect(flightWrites.map((body) => body.length)).toEqual([FLIGHTS.length + 1, FLIGHTS.length, FLIGHTS.length + 1]);
   });
 });
 
@@ -412,7 +455,7 @@ describe('ReferenceLibraryPage unlisted flight references', () => {
     expect(screen.getAllByRole('button', { name: /delete catalog entry/i })).toHaveLength(3);
     fireEvent.click(screen.getByRole('button', { name: /delete selected \(3\)/i }));
     fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete' }));
-    await waitFor(() => expect(batchCalls.map((call) => call.keys)).toEqual([['CA', 'MU', 'CZ']]));
+    await waitFor(() => expect(batchCalls.map((call) => call.keys)).toEqual([['CA'], ['CA', 'CZ'], ['CA', 'MU', 'CZ']]));
   });
 
   it('filters derived rows and renders them when the persisted catalog is empty', async () => {

@@ -31,10 +31,10 @@ export const ELECTRONIC_CROP_PRESETS_STORAGE_KEY = 'flightarchive.ui.electronicC
  * without coupling the crop to business data.
  */
 export const ELECTRONIC_LAST_CROP_STORAGE_KEY = 'flightarchive.ui.electronicLastCrop';
-/** Matches the backend limit for `extraction.presetName`. */
+/** Matches the domain-schema limit for `extraction.presetName`. */
 export const PRESET_NAME_MAX_LENGTH = 128;
 /**
- * The backend requires a nonempty `extraction.presetName` whenever extraction
+ * The domain schema requires a nonempty `extraction.presetName` whenever extraction
  * data is persisted, so an unnamed crop is saved under this reserved name and
  * no local preset entry is created for it.
  */

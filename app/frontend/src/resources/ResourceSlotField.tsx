@@ -6,6 +6,7 @@ import { Box, Button, Chip, Tooltip, Typography } from '@mui/material';
 import { ResourceImage } from './ResourceImage';
 import { ResourcePickerDialog } from './ResourcePickerDialog';
 import { useTranslation } from '../i18n';
+import { ImageRequestScope } from './ImageRequestScope';
 
 export function ResourceSlotField({
   label,
@@ -40,7 +41,7 @@ export function ResourceSlotField({
           {label}
         </Typography>
         {resourcePath ? (
-          <ResourceImage resourcePath={resourcePath} size={44} alt={label} contain={imageContain} />
+          <ImageRequestScope active={!open}><ResourceImage resourcePath={resourcePath} size={44} alt={label} contain={imageContain} /></ImageRequestScope>
         ) : (
           <Box sx={{ width: 44, height: 44, border: '1px dashed', borderColor: 'divider', borderRadius: 1, display: 'grid', placeItems: 'center', color: 'text.disabled', flex: '0 0 auto' }}>
             <Typography variant="caption" sx={{ fontSize: '0.75rem' }}>—</Typography>
@@ -87,7 +88,7 @@ export function ResourceSlotField({
     <Box sx={{ border: 1, borderColor: 'divider', borderRadius: 2, p: 1.5, width: 280, flex: '0 0 auto' }}>
       <Typography variant="caption">{label}</Typography>
       <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start', mt: 1 }}>
-         {resourcePath ? <ResourceImage resourcePath={resourcePath} size={56} alt={label} contain={imageContain} /> : null}
+         {resourcePath ? <ImageRequestScope active={!open}><ResourceImage resourcePath={resourcePath} size={56} alt={label} contain={imageContain} /></ImageRequestScope> : null}
         <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, flex: 1, minWidth: 0 }}>
           <Button size="small" onClick={() => setOpen(true)}>
             {resourcePath ? t('changeResource') : t('selectResource')}

@@ -161,4 +161,20 @@ describe('independent source state', () => {
     fireEvent.click(screen.getByText('Details'));
     expect(screen.getByText(/invalid legacy archive/)).toBeTruthy();
   });
+
+  it.each([
+    ['en', ['A resource association operation failed.', 'Operation failed and resource recovery could not be confirmed. Try the original action again.', 'A business data document could not be saved.', 'Archive recovery failed. Retry saving.']],
+    ['zh-CN', ['资源关联操作失败。', '操作失败，且无法确认资源恢复成功。请重新执行原操作。', '业务数据文档保存失败。', '存档恢复失败，请重试保存。']],
+  ])('localizes known coordination and prepared-archive activity codes in %s while retaining protocol evidence', async (language, titles) => {
+    localStorage.setItem('flightarchive.ui.language', language);
+    const codes = ['resource-coordination-failed', 'resource-coordination-compensation-failed', 'archive-prepared-commit-failed', 'archive-prepared-rollback-failed'];
+    const records = codes.map((code, index) => activity({ id: `activity-${index}`, code, severity: 'error', state: 'failed', details: { marker: code } }));
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => String(input).startsWith('/api/activity')
+      ? response(activityPage(records)) : response(tasksPage())));
+    renderWithProviders(<TasksPage />);
+    for (const title of titles) expect(await screen.findByText(title)).toBeTruthy();
+    for (const code of codes) expect(screen.getByText(code)).toBeTruthy();
+    fireEvent.click(screen.getAllByText(language === 'en' ? 'Details' : '详情')[0]);
+    expect(screen.getByText(/"marker": "resource-coordination-failed"/)).toBeTruthy();
+  });
 });

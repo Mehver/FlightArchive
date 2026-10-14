@@ -3,11 +3,11 @@
 
 /**
  * Controlled fingerprint dialog for present stable RFG mappings. The parent
- * owns direct calculation, progress and errors, while this dialog
+ * owns direct calculation and progress, while this dialog
  * only owns the algorithm selection, and derives the concrete target list
  * at calculate time from the latest props so a background reload can never
- * resurrect a stale selection. Pending inbox files are not eligible until
- * explicitly materialized.
+ * resurrect a stale selection. Pending inbox files are not fingerprint
+ * targets; form saves bind them to stable managed paths first.
  */
 
 import { useEffect, useMemo, useState } from 'react';
@@ -35,8 +35,8 @@ import { SearchHighlight } from './SearchHighlight';
 
 const MONO = { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', wordBreak: 'break-all' } as const;
 
-/** Language-neutral labels; algorithm names are protocol vocabulary.
- *  Shared with the background-tasks page, which renders the same items. */
+/** Language-neutral protocol labels shared by this dialog and read-only
+ * legacy fingerprint-history records. */
 export const ALGORITHM_LABEL: Record<HashAlgorithm, string> = {
   crc32: 'CRC-32',
   md5: 'MD5',
@@ -46,8 +46,8 @@ export const ALGORITHM_LABEL: Record<HashAlgorithm, string> = {
   phash: 'pHash',
 };
 
-/** Known terminal fingerprint failure codes → i18n keys. Shared with the
- *  background-tasks page, whose task items carry the same code vocabulary. */
+/** Known terminal fingerprint failure codes → i18n keys, shared by current
+ * centralized results and read-only legacy fingerprint-history records. */
 export const RESULT_CODE_KEY: Partial<Record<string, TranslationKey>> = {
   source_stale: 'fingerprintCodeSourceStale',
   changed_during_hash: 'fingerprintCodeChangedDuringHash',
@@ -99,7 +99,6 @@ export function FingerprintDialog({
   open,
   targets,
   busy,
-  error,
   progress,
   onCancel,
   onCalculate,
@@ -109,7 +108,6 @@ export function FingerprintDialog({
   /** Eligible targets resolved from the latest rows. */
   targets: FingerprintTarget[];
   busy: boolean;
-  error: string | null;
   progress?: { completed: number; total: number; succeeded: number; failed: number };
   onCancel?: () => void;
   onCalculate: (virtualPaths: string[], algorithms: HashAlgorithm[], forceOverwrite: boolean) => void;
@@ -174,14 +172,9 @@ export function FingerprintDialog({
           {t('fingerprintPerceptualHint')}
         </Typography>
 
-        {error ? (
-          <Alert severity="error" sx={{ mb: 2 }} role="alert">
-            {error}
-          </Alert>
-        ) : null}
         {busy && progress ? (
           <Alert severity="info" sx={{ mb: 2 }}>
-            {`${progress.completed}/${progress.total} · ${progress.succeeded} succeeded · ${progress.failed} failed`}
+            {`${progress.completed}/${progress.total} · ${t('taskResults', { succeeded: progress.succeeded, failed: progress.failed })}`}
           </Alert>
         ) : null}
 

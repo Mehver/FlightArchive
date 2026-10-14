@@ -12,6 +12,8 @@ import {
 } from 'react';
 import { Alert, Snackbar } from '@mui/material';
 import { ApiError } from '../api/client';
+import { api } from '../api/client';
+import type { ActivitySubmission } from '../api/types';
 import { useTranslation } from '../i18n';
 
 export type FeedbackSeverity = 'success' | 'info' | 'warning' | 'error';
@@ -44,11 +46,19 @@ export interface FeedbackInput {
   code?: string;
 }
 
+export interface FailureReport {
+  fallback?: string;
+  context?: FeedbackContext;
+  code?: string;
+  activity?: ActivitySubmission;
+}
+
 interface FeedbackValue {
   records: readonly FeedbackRecord[];
   feedback: (input: FeedbackInput) => FeedbackRecord;
   notify: (message: string, severity?: FeedbackSeverity, context?: FeedbackContext) => FeedbackRecord;
   showError: (error: unknown, fallback?: string, context?: FeedbackContext) => FeedbackRecord;
+  reportFailure: (error: unknown, report?: FailureReport) => FeedbackRecord;
 }
 
 const FeedbackContextValue = createContext<FeedbackValue | null>(null);
@@ -60,6 +70,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
   const [records, setRecords] = useState<FeedbackRecord[]>([]);
   const [toast, setToast] = useState<FeedbackRecord | null>(null);
   const sequence = useRef(0);
+  const reportedFailures = useRef(new WeakMap<object, { record: FeedbackRecord; activityAttempted: boolean }>());
 
   const feedback = useCallback((input: FeedbackInput) => {
     const createdAt = new Date().toISOString();
@@ -85,7 +96,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
     [feedback],
   );
 
-  const showError = useCallback((error: unknown, fallback?: string, context?: FeedbackContext) => {
+  const publishError = useCallback((error: unknown, fallback?: string, context?: FeedbackContext, code?: string) => {
     const localizedFallback = fallback ?? t('operationFailed');
     if (error instanceof ApiError) {
       const message = error.code === 'network'
@@ -94,12 +105,36 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
           ? `${localizedFallback} (${t('apiRequestFailed', { status: error.httpStatus })})`
           : localizedFallback;
       const detail = Array.isArray(error.details) ? t('apiDetails', { count: error.details.length }) : '';
-      return feedback({ message: `${message}${detail}`, severity: 'error', context, code: error.code });
+      return feedback({ message: `${message}${detail}`, severity: 'error', context, code: code ?? error.code });
     }
-    return feedback({ message: localizedFallback, severity: 'error', context });
+    return feedback({ message: localizedFallback, severity: 'error', context, code });
   }, [feedback, t]);
 
-  const value = useMemo<FeedbackValue>(() => ({ records, feedback, notify, showError }), [records, feedback, notify, showError]);
+  const reportFailure = useCallback((error: unknown, report: FailureReport = {}) => {
+    const keyed = (typeof error === 'object' && error !== null) || typeof error === 'function';
+    const existing = keyed ? reportedFailures.current.get(error as object) : undefined;
+    if (existing) {
+      if (report.activity && !existing.activityAttempted) {
+        existing.activityAttempted = true;
+        void api.reportActivity(report.activity).catch(() => undefined);
+      }
+      return existing.record;
+    }
+    const code = report.code ?? report.activity?.code;
+    const fallback = report.fallback ?? (code === 'archive-load-failed'
+      ? t('businessDataLoadFailed')
+      : code === 'resource-mapping-failed' ? t('mappingLoadFailed') : undefined);
+    const record = publishError(error, fallback, report.context, code);
+    const entry = { record, activityAttempted: Boolean(report.activity) };
+    if (keyed) reportedFailures.current.set(error as object, entry);
+    if (report.activity) void api.reportActivity(report.activity).catch(() => undefined);
+    return record;
+  }, [publishError, t]);
+
+  const showError = useCallback((error: unknown, fallback?: string, context?: FeedbackContext) =>
+    reportFailure(error, { fallback, context }), [reportFailure]);
+
+  const value = useMemo<FeedbackValue>(() => ({ records, feedback, notify, showError, reportFailure }), [records, feedback, notify, showError, reportFailure]);
   return (
     <FeedbackContextValue.Provider value={value}>
       {children}
@@ -124,4 +159,8 @@ export function useFeedback(): FeedbackValue {
   const value = useContext(FeedbackContextValue);
   if (!value) throw new Error('useFeedback must be used inside FeedbackProvider');
   return value;
+}
+
+export function useOptionalFeedback(): FeedbackValue | null {
+  return useContext(FeedbackContextValue);
 }

@@ -56,7 +56,7 @@ function validHexOrNull(color: unknown): HexColor | null {
  */
 export function ElectronicBoardingPassStudio({ open, flight, onSaved, onClose }: ScanStudioDialogProps) {
   const { t } = useTranslation();
-  const { notify, showError } = useAppState();
+  const { notify, reportFailure } = useAppState();
   const business = useBusinessData();
   const dialogScale = useDialogScale();
   const resourcePath = flight.electronicBoardingPassResourcePath;
@@ -229,7 +229,7 @@ export function ElectronicBoardingPassStudio({ open, flight, onSaved, onClose }:
   const save = async () => {
     if (!imageBounds || !cropUsable) return;
     setSaving(true);
-    // The backend requires a nonempty presetName whenever extraction data is
+    // The domain schema requires a nonempty presetName whenever extraction data is
     // persisted, and strict RGB-or-null colours (never undefined).
     const name = presetName.trim().slice(0, PRESET_NAME_MAX_LENGTH) || DEFAULT_PRESET_NAME;
     const normalized = normalizeElectronicCrop(crop, imageBounds);
@@ -249,7 +249,7 @@ export function ElectronicBoardingPassStudio({ open, flight, onSaved, onClose }:
       onSaved(result);
       onClose();
     } catch (error) {
-      showError(error, t('studioSaveFailed'), { action: t('studioSave'), form: t('electronicBoardingPass') });
+      reportFailure(error, { fallback: t('studioSaveFailed'), context: { action: t('studioSave'), form: t('electronicBoardingPass') } });
     } finally {
       setSaving(false);
     }

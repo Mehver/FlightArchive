@@ -18,19 +18,18 @@ export function formatMappingPath(path: string, mode: MappingPathDisplayMode): s
   return mode === 1 ? basename(path) : middleEllipsisPath(path);
 }
 
-export function mappingStatusColor(kind: MappingRowKind, unbound = false): ChipProps['color'] {
+export function mappingStatusColor(kind: MappingRowKind): ChipProps['color'] {
   if (kind === 'missing') return 'error';
-  if (kind === 'inbox' || (kind === 'paired' && unbound)) return 'warning';
+  if (kind === 'inbox') return 'warning';
   if (kind === 'paired') return 'success';
   return 'default';
 }
 
-export function MappingStatusChip({ kind, label, unbound = false }: {
+export function MappingStatusChip({ kind, label }: {
   kind: MappingRowKind;
   label: ReactNode;
-  unbound?: boolean;
 }) {
-  return <Chip size="small" variant="outlined" color={mappingStatusColor(kind, unbound)} label={label} />;
+  return <Chip size="small" variant="outlined" color={mappingStatusColor(kind)} label={label} />;
 }
 
 export function MappingHeaderCell({

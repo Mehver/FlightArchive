@@ -5,7 +5,7 @@
 
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ReactNode } from 'react';
+import { useRef, type ReactNode } from 'react';
 import { ApiError } from '../api/client';
 import { LanguageProvider } from '../i18n';
 import { TasksPage } from '../tasks/TasksPage';
@@ -24,10 +24,21 @@ function ModuleButton({ module, error = false }: { module: string; error?: boole
 }
 
 function Inspector() {
-  const { records, showError } = useFeedback();
+  const { records, showError, reportFailure } = useFeedback();
+  const important = useRef(new Error('do not expose this detail')).current;
   return (
     <>
       <button onClick={() => showError(new ApiError(503, 'request-failed', 'refresh failed'))}>API</button>
+      <button onClick={() => {
+        const activity = { source: 'frontend-test', kind: 'test', severity: 'error', state: 'failed', code: 'test-failed', details: { marker: 'one' } };
+        reportFailure(important, { fallback: 'Could not complete.', activity });
+        reportFailure(important, { fallback: 'Duplicate.', activity });
+      }}>important</button>
+      <button onClick={() => reportFailure(important, { fallback: 'Local failure.' })}>local</button>
+      <button onClick={() => reportFailure(important, {
+        fallback: 'Should not replace local.',
+        activity: { source: 'frontend-test', kind: 'test', severity: 'error', state: 'failed', code: 'upgraded', details: { marker: 'upgrade' } },
+      })}>upgrade</button>
       <output data-testid="records">{JSON.stringify(records)}</output>
     </>
   );
@@ -117,6 +128,32 @@ describe('FeedbackProvider', () => {
     expect(records.map((record: { context: { form: string } }) => record.context.form)).toEqual(['resources', 'flights']);
   });
 
+  it('publishes one toast, record, and optional activity for one reported failure', async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => { throw new Error('activity unavailable'); });
+    vi.stubGlobal('fetch', fetcher);
+    renderFeedback(<Inspector />);
+    fireEvent.click(screen.getByRole('button', { name: 'important' }));
+    expect(screen.getByRole('alert').textContent).toBe('Could not complete.');
+    expect(JSON.parse(screen.getByTestId('records').textContent ?? '[]')).toHaveLength(1);
+    await act(async () => { await Promise.resolve(); });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({ code: 'test-failed', details: { marker: 'one' } });
+  });
+
+  it('upgrades an existing local failure to one persistent attempt without another record', async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetcher);
+    renderFeedback(<Inspector />);
+    fireEvent.click(screen.getByRole('button', { name: 'local' }));
+    expect(JSON.parse(screen.getByTestId('records').textContent ?? '[]')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'upgrade' }));
+    fireEvent.click(screen.getByRole('button', { name: 'upgrade' }));
+    await act(async () => { await Promise.resolve(); });
+    expect(JSON.parse(screen.getByTestId('records').textContent ?? '[]')).toHaveLength(1);
+    expect(screen.getByRole('alert').textContent).toBe('Local failure.');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it('renders retained frontend activity beside an empty backend task stream', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ days: [], nextCursor: null, hasMore: false }) })));
     renderFeedback(<><ModuleButton module="resources" /><TasksPage /></>);
@@ -124,6 +161,6 @@ describe('FeedbackProvider', () => {
 
     expect((await screen.findByTestId('activity-record')).textContent).toContain('Saved.');
     expect(screen.getByTestId('activity-record').textContent).toContain('Completed');
-    expect(await screen.findByText('No Background Tasks')).toBeTruthy();
+    expect(await screen.findByText('No Legacy Fingerprint Records')).toBeTruthy();
   });
 });

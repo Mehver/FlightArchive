@@ -16,7 +16,7 @@ import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 from urllib.parse import quote
 
 import httpx
@@ -44,6 +44,10 @@ class ThumbnailError(Exception):
     def __init__(self, status: int, code: str, message: str):
         self.status, self.code, self.message = status, code, message
         super().__init__(message)
+
+
+class ThumbnailDisconnected(Exception):
+    """The HTTP peer left while waiting; this is not a business failure."""
 
 
 class _SourceChanged(Exception):
@@ -497,16 +501,62 @@ class ThumbnailService:
             return ThumbnailResult(None, self._headers(source, geometry, scale_text, derivative_etag), False)
         raise AssertionError("unreachable")
 
-    async def get(self, virtual_path: str, scale: float, scale_text: str) -> ThumbnailResult:
+    async def get(
+        self, virtual_path: str, scale: float, scale_text: str,
+        disconnected: Callable[[], Awaitable[bool]] | None = None,
+    ) -> ThumbnailResult:
+        await self._raise_if_disconnected(disconnected)
         for attempt in range(2):
             try:
-                return await self._get_once(virtual_path, scale, scale_text)
+                return await self._get_once(virtual_path, scale, scale_text, disconnected)
             except _SourceChanged:
                 if attempt:
                     raise ThumbnailError(503, "resource-changing", "source resource changed during thumbnail generation")
         raise AssertionError("unreachable")
 
-    async def _get_once(self, virtual_path: str, scale: float, scale_text: str) -> ThumbnailResult:
+    @staticmethod
+    async def _raise_if_disconnected(disconnected: Callable[[], Awaitable[bool]] | None) -> None:
+        if disconnected is not None and await disconnected():
+            raise ThumbnailDisconnected
+
+    async def _acquire_heavy(self, disconnected: Callable[[], Awaitable[bool]] | None) -> None:
+        while True:
+            await self._raise_if_disconnected(disconnected)
+            try:
+                await asyncio.wait_for(self._heavy_jobs.acquire(), timeout=0.05)
+                return
+            except asyncio.TimeoutError:
+                continue
+
+    @staticmethod
+    async def _protected_thread(function, *args):
+        """Do not release the heavy slot while cancellation leaves Pillow running."""
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(None, function, *args)
+        cancelled = False
+        while not future.done():
+            try:
+                await asyncio.shield(future)
+            except asyncio.CancelledError:
+                cancelled = True
+        # Retrieve either value or exception so a cancellation does not leave
+        # an unobserved executor failure. The shield keeps ordinary request
+        # cancellation from cancelling this Future on Python 3.10+.
+        try:
+            result = future.result()
+        except BaseException:
+            if cancelled:
+                raise asyncio.CancelledError from None
+            raise
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    async def _get_once(
+        self, virtual_path: str, scale: float, scale_text: str,
+        disconnected: Callable[[], Awaitable[bool]] | None,
+    ) -> ThumbnailResult:
+        await self._raise_if_disconnected(disconnected)
         source = await self._head_source(virtual_path)
         key = self._key(virtual_path, source, scale_text)
         derivative_etag = f'"thumb-{key}"'
@@ -514,7 +564,9 @@ class ThumbnailService:
         if cached:
             blob, geometry = cached
             return ThumbnailResult(blob, self._headers(source, geometry, scale_text, derivative_etag), True)
-        async with self._heavy_jobs:
+        await self._acquire_heavy(disconnected)
+        try:
+            await self._raise_if_disconnected(disconnected)
             current = await self._head_source(virtual_path)
             if current != source:
                 raise _SourceChanged
@@ -522,9 +574,12 @@ class ThumbnailService:
             if cached:
                 blob, geometry = cached
                 return ThumbnailResult(blob, self._headers(source, geometry, scale_text, derivative_etag), True)
+            await self._raise_if_disconnected(disconnected)
             geometry = await self._inspect(virtual_path, source, scale)
+            await self._raise_if_disconnected(disconnected)
             payload = await self._source_get(virtual_path, source)
-            blob = await asyncio.to_thread(self._render, payload, geometry)
+            await self._raise_if_disconnected(disconnected)
+            blob = await self._protected_thread(self._render, payload, geometry)
             metadata = {
                 "sourceEtag": source.etag, "sourceBytes": source.size,
                 "sourceWidth": geometry.source_width, "sourceHeight": geometry.source_height,
@@ -533,6 +588,8 @@ class ThumbnailService:
             }
             await asyncio.to_thread(self._cache.write, key, blob, metadata)
             return ThumbnailResult(blob, self._headers(source, geometry, scale_text, derivative_etag), False)
+        finally:
+            self._heavy_jobs.release()
 
     async def _source_get(self, virtual_path: str, source: SourceIdentity) -> bytes:
         try:

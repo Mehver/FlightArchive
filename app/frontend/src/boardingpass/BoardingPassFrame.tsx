@@ -25,7 +25,7 @@
  */
 
 import { useEffect, useLayoutEffect, useState } from 'react';
-import { Box, CircularProgress, Tooltip, Typography } from '@mui/material';
+import { Box, Tooltip, Typography } from '@mui/material';
 import type { Theme } from '@mui/material/styles';
 import { useTheme } from '@mui/material/styles';
 import BrokenImageOutlinedIcon from '@mui/icons-material/BrokenImageOutlined';
@@ -36,7 +36,8 @@ import { useBrowserImage } from '../resources/useBrowserImage';
 import { useNearViewport } from '../resources/useNearViewport';
 import { templateById } from '../scanstudio/templates';
 import { useTranslation, type TranslationKey } from '../i18n';
-import { placementBox, slotState, type BoardingPassSlotKey } from './passPresentation';
+import { ImageLoadingIndicator } from '../resources/ImageLoadingIndicator';
+import { BOARDING_PASS_PREVIEW_DIMENSION, placementBox, slotState, type BoardingPassSlotKey } from './passPresentation';
 
 /** Aspect ratio shared by the bundled paper templates (247×100). */
 export const DEFAULT_FRAME_ASPECT = 247 / 100;
@@ -61,9 +62,9 @@ function ImageUnavailable({ error }: { error: unknown }) {
 
 /** Full-bleed cover image using a bounded browser thumbnail, with a graceful
  *  broken-image fallback instead of an original-route download. */
-function CoverImage({ resourcePath, alt, contain = false, enabled, maxDimension }: { resourcePath: string; alt: string; contain?: boolean; enabled: boolean; maxDimension: number }) {
+function CoverImage({ resourcePath, alt, contain = false, enabled, maxDimension, qualityCrop }: { resourcePath: string; alt: string; contain?: boolean; enabled: boolean; maxDimension: number; qualityCrop?: { width: number; height: number } }) {
   const { t } = useTranslation();
-  const image = useBrowserImage(resourcePath, { enabled, maxDimension });
+  const image = useBrowserImage(resourcePath, { enabled, maxDimension, qualityCrop });
   const [elementFailed, setElementFailed] = useState(false);
   const [elementLoaded, setElementLoaded] = useState(false);
   useEffect(() => setElementFailed(false), [resourcePath, image.src]);
@@ -80,13 +81,13 @@ function CoverImage({ resourcePath, alt, contain = false, enabled, maxDimension 
         onError={() => setElementFailed(true)}
         sx={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: contain ? 'contain' : 'cover', display: 'block', opacity: elementLoaded ? 1 : 0 }}
       /> : null}
-      {enabled && (image.status === 'loading' || image.status === 'ready' && !elementLoaded) ? <CircularProgress size={24} aria-label={t('loading')} sx={{ position: 'absolute', left: '50%', top: '50%', ml: '-12px', mt: '-12px' }} /> : null}
+      <ImageLoadingIndicator loading={enabled && (image.status === 'loading' || image.status === 'ready' && !elementLoaded)} label={t('loading')} />
     </>
   );
 }
 
 /** A prepared crop uses saved placement and fails closed if relay rendering is unavailable. */
-function PreparedPreview({ resourcePath, layout, box, templateUrl, dark, alt, enabled, maxDimension }: {
+function PreparedPreview({ resourcePath, layout, box, templateUrl, dark, alt, enabled, maxDimension, qualityCrop }: {
   resourcePath: string;
   layout: PaperBoardingPassLayout;
   box: NonNullable<ReturnType<typeof placementBox>>;
@@ -95,10 +96,11 @@ function PreparedPreview({ resourcePath, layout, box, templateUrl, dark, alt, en
   alt: string;
   enabled: boolean;
   maxDimension: number;
+  qualityCrop?: { width: number; height: number };
 }) {
   const { t } = useTranslation();
   const crop = layout.crop;
-  const image = useBrowserImage(resourcePath, { crop, maxDimension, enabled });
+  const image = useBrowserImage(resourcePath, { crop, qualityCrop, maxDimension, enabled });
   const [elementFailed, setElementFailed] = useState(false);
   const [elementLoaded, setElementLoaded] = useState(false);
   useEffect(() => setElementFailed(false), [resourcePath, image.src]);
@@ -110,7 +112,7 @@ function PreparedPreview({ resourcePath, layout, box, templateUrl, dark, alt, en
       {image.status === 'ready' ? <Box sx={{ position: 'absolute', left: `${box.leftPct}%`, top: `${box.topPct}%`, width: `${box.widthPct}%`, height: `${box.heightPct}%`, transform: `rotate(${box.rotationDegrees}deg)`, overflow: 'hidden', boxShadow: 1, bgcolor: 'background.paper' }}>
         <Box component="img" src={image.src} alt={alt} loading="lazy" onLoad={() => setElementLoaded(true)} onError={() => setElementFailed(true)} sx={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'fill', display: 'block', opacity: elementLoaded ? 1 : 0 }} />
       </Box> : null}
-      {enabled && (image.status === 'loading' || image.status === 'ready' && !elementLoaded) ? <CircularProgress size={24} aria-label={t('loading')} sx={{ position: 'absolute', left: '50%', top: '50%', ml: '-12px', mt: '-12px' }} /> : null}
+      <ImageLoadingIndicator loading={enabled && (image.status === 'loading' || image.status === 'ready' && !elementLoaded)} label={t('loading')} />
     </>
   );
 }
@@ -129,7 +131,8 @@ export function BoardingPassFrame({
   aspectRatio = DEFAULT_FRAME_ASPECT,
   compact = false,
   layered = true,
-  maxDimension = 512,
+  maxDimension = BOARDING_PASS_PREVIEW_DIMENSION,
+  qualityCrop,
 }: {
   slot: BoardingPassSlotKey;
   resourcePath: string | null;
@@ -140,8 +143,10 @@ export function BoardingPassFrame({
   compact?: boolean;
   /** Whether to render the offset backing sheet(s) behind the face card. */
   layered?: boolean;
-  /** Maximum rendered crop dimension; callers may lower this for compact previews. */
+  /** Maximum rendered crop dimension. Archive views share the detail-quality default. */
   maxDimension?: number;
+  /** Shared request-quality reference when front/back bind the same source. */
+  qualityCrop?: { width: number; height: number };
 }) {
   const { t } = useTranslation();
   const theme = useTheme();
@@ -210,10 +215,10 @@ export function BoardingPassFrame({
         ]}
       >
         {prepared && resourcePath ? (
-          <PreparedPreview resourcePath={resourcePath} layout={layout!} box={box} templateUrl={template?.url ?? null} dark={theme.palette.mode === 'dark'} alt={t(slotLabelKey)} enabled={visibility.enabled} maxDimension={maxDimension} />
+          <PreparedPreview resourcePath={resourcePath} layout={layout!} box={box} templateUrl={template?.url ?? null} dark={theme.palette.mode === 'dark'} alt={t(slotLabelKey)} enabled={visibility.enabled} maxDimension={maxDimension} qualityCrop={qualityCrop} />
         ) : showScan && resourcePath ? (
           <>
-            <CoverImage resourcePath={resourcePath} alt={t(slotLabelKey)} enabled={visibility.enabled} maxDimension={maxDimension} />
+            <CoverImage resourcePath={resourcePath} alt={t(slotLabelKey)} enabled={visibility.enabled} maxDimension={maxDimension} qualityCrop={qualityCrop} />
             <Tooltip title={t('bpUnpreparedHint')}>
               <Box
                 sx={{

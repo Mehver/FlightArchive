@@ -18,7 +18,7 @@ import { api } from '../api/client';
 import type { Catalogs } from '../api/types';
 import { BusinessDataProvider, useBusinessData } from '../domain/BusinessDataProvider';
 import { useWorkspaceHeartbeat, type ConnectivityState } from './useWorkspaceHeartbeat';
-import { FeedbackProvider, useFeedback, type FeedbackContext, type FeedbackSeverity } from '../feedback/FeedbackCenter';
+import { FeedbackProvider, useFeedback, useOptionalFeedback, type FailureReport, type FeedbackContext, type FeedbackRecord, type FeedbackSeverity } from '../feedback/FeedbackCenter';
 
 interface AppStateValue {
   connectivity: ConnectivityState;
@@ -27,6 +27,7 @@ interface AppStateValue {
   refreshAll: () => Promise<void>;
   notify: (message: string, severity?: FeedbackSeverity, context?: FeedbackContext) => void;
   showError: (error: unknown, fallback?: string, context?: FeedbackContext) => void;
+  reportFailure: (error: unknown, report?: FailureReport) => FeedbackRecord;
   observedActivityRevision: string | null;
   lastReadActivityRevision: string | null;
   hasUnreadActivity: boolean;
@@ -36,7 +37,7 @@ interface AppStateValue {
 const AppStateContext = createContext<AppStateValue | null>(null);
 
 function AppStateProviderInner({ children }: { children: ReactNode }) {
-  const { notify, showError } = useFeedback();
+  const { notify, showError, reportFailure } = useFeedback();
   const { data } = useBusinessData();
   const { connectivity, status, recheck: recheckConnection } = useWorkspaceHeartbeat(api.status);
   const [lastReadActivityRevision, setLastReadActivityRevision] = useState<string | null>(null);
@@ -63,12 +64,13 @@ function AppStateProviderInner({ children }: { children: ReactNode }) {
       refreshAll,
       notify,
       showError,
+      reportFailure,
       observedActivityRevision,
       lastReadActivityRevision,
       hasUnreadActivity,
       markActivityRead,
     }),
-    [connectivity, recheckConnection, catalogs, refreshAll, notify, showError, observedActivityRevision, lastReadActivityRevision, hasUnreadActivity, markActivityRead],
+    [connectivity, recheckConnection, catalogs, refreshAll, notify, showError, reportFailure, observedActivityRevision, lastReadActivityRevision, hasUnreadActivity, markActivityRead],
   );
 
   return (
@@ -81,6 +83,8 @@ function AppStateProviderInner({ children }: { children: ReactNode }) {
 /** Includes exactly one feedback host so legacy AppState consumers and new
  * useFeedback consumers share records rather than rendering duplicate toasts. */
 export function AppStateProvider({ children }: { children: ReactNode }) {
+  const existingFeedback = useOptionalFeedback();
+  if (existingFeedback) return <BusinessDataProvider><AppStateProviderInner>{children}</AppStateProviderInner></BusinessDataProvider>;
   return (
     <FeedbackProvider>
       <BusinessDataProvider><AppStateProviderInner>{children}</AppStateProviderInner></BusinessDataProvider>

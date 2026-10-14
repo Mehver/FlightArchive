@@ -29,11 +29,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1", help="bind host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8787, help="bind port (default: 8787)")
     parser.add_argument(
-        "--dev",
-        action="store_true",
-        help="development mode: allow CORS from the Vite dev server (localhost:5173)",
-    )
-    parser.add_argument(
         "--resource-root",
         type=Path,
         help="RFG resource root (default: RFG_RESOURCE_PATH or /resource)",

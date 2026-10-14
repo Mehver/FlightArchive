@@ -4,7 +4,6 @@
 import { useMemo, useRef, useState, type ChangeEvent, type MouseEvent, type ReactNode } from 'react';
 import {
   AppBar,
-  Alert,
   Box,
   Badge,
   Chip,
@@ -52,7 +51,7 @@ type PageKey = 'flights' | 'flightReference' | 'resourceMappings';
 export function BusinessDataActions() {
   const { t } = useTranslation();
   const business = useBusinessData();
-  const { connectivity, recheckConnection, showError } = useAppState();
+  const { connectivity, recheckConnection, notify, reportFailure } = useAppState();
   const inputRef = useRef<HTMLInputElement>(null);
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
   const failed = Object.entries(business.documents).filter(([, state]) => state.error);
@@ -69,8 +68,17 @@ export function BusinessDataActions() {
   const hasWarning = !hasFailure && dirty.length > 0;
 
   const saveAll = () => {
-    void business.saveAll().catch((error: unknown) => {
-      showError(error, t('businessDataSaveUnexpectedFailure'), { form: 'business-data' });
+    void business.saveAll().then((result) => {
+      if (result.failed.length) {
+        const error = new Error('one or more business data documents could not be saved');
+        reportFailure(error, {
+          fallback: t('businessDataSaveProgressFailed', { completed: 5 - result.failed.length, total: 5 }),
+          context: { form: 'business-data' },
+          activity: { source: 'frontend-business-data', kind: 'persistence', severity: 'error', state: 'failed', code: 'archive-save-all-failed', details: { failed: result.failed } },
+        });
+      } else notify(t('businessDataSaveProgressSucceeded', { completed: 5, total: 5 }), 'success', { form: 'business-data' });
+    }).catch((error: unknown) => {
+      reportFailure(error, { fallback: t('businessDataSaveUnexpectedFailure'), context: { form: 'business-data' } });
     });
   };
 
@@ -97,9 +105,16 @@ export function BusinessDataActions() {
     event.target.value = '';
     if (!file) return;
     try {
-      await business.importBusinessData(JSON.parse(await file.text()));
+      const result = await business.importBusinessData(JSON.parse(await file.text()));
+      if (result.failed.length) {
+        const error = new Error('one or more imported business data documents could not be saved');
+        reportFailure(error, {
+          fallback: t('businessDataImportFailed'), context: { form: 'business-data-import' },
+          activity: { source: 'frontend-business-data', kind: 'persistence', severity: 'error', state: 'failed', code: 'archive-import-failed', details: { failed: result.failed } },
+        });
+      } else notify(t('businessDataSaveProgressSucceeded', { completed: 5, total: 5 }), 'success', { form: 'business-data-import' });
     } catch (error) {
-      showError(error, t('businessDataImportFailed'), { form: 'business-data-import' });
+      reportFailure(error, { fallback: t('businessDataImportFailed'), context: { form: 'business-data-import' } });
     }
   };
 
@@ -178,7 +193,6 @@ function Shell() {
   const {
     observedActivityRevision, hasUnreadActivity, markActivityRead,
   } = useAppState();
-  const { phase: businessPhase, loadError: businessLoadError } = useBusinessData();
   const { language, toggleLanguage, t } = useTranslation();
   const [page, setPage] = useState<PageKey>('flights');
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -332,9 +346,6 @@ function Shell() {
           }}
         >
           <Toolbar />
-          {businessPhase === 'error' ? (
-            <Alert severity="error" sx={{ mt: 1 }}>{businessLoadError?.message ?? t('businessDataLoadFailed')}</Alert>
-          ) : null}
           {page === 'flights' ? <FlightsPage /> : null}
           {page === 'flightReference' ? <ReferenceLibraryPage /> : null}
           {page === 'resourceMappings' ? <ResourceMappingsPage /> : null}

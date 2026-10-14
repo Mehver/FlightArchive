@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 import type { AircraftType, Airline, Airport, BusinessData, ElectronicBoardingPassPresentation, FlightRecord } from './types';
-import { assertAllowed, assertStableResourcePath, DomainValidationError, hexColor, isRecord, optionalString, parsePaperLayout, stringList, stringValue } from './validation';
+import { assertAllowed, assertDraftResourcePath, assertStableResourcePath, DomainValidationError, hexColor, isRecord, optionalString, parsePaperLayout, stringList, stringValue } from './validation';
 
 const AIRCRAFT_FIELDS = ['icao', 'iata', 'manufacturer', 'displayName'];
 
@@ -27,7 +27,7 @@ function rejectLegacyFields(value: unknown): void {
   }
 }
 
-export function normalizeAirline(value: unknown, options: { submission?: boolean } = {}): Airline {
+export function normalizeAirline(value: unknown, options: { submission?: boolean; inboxDraft?: boolean } = {}): Airline {
   const raw = object(value, 'airline');
   const colors = raw.brandColors === undefined ? {} : object(raw.brandColors, 'airline.brandColors');
   if (options.submission && raw.brandColors !== undefined) {
@@ -36,7 +36,7 @@ export function normalizeAirline(value: unknown, options: { submission?: boolean
   }
   if (options.submission) for (const field of ['horizontalLogoResourcePath', 'horizontalDarkLogoResourcePath', 'symbolLogoResourcePath'] as const) {
     if (raw[field] !== undefined && raw[field] !== null && typeof raw[field] !== 'string') throw new DomainValidationError([`airline.${field} must be null or a resource path`]);
-    if (typeof raw[field] === 'string') assertStableResourcePath(raw[field], `airline.${field}`);
+    if (typeof raw[field] === 'string') (options.inboxDraft ? assertDraftResourcePath : assertStableResourcePath)(raw[field], `airline.${field}`);
   }
   const airline: Airline = {
     code: stringValue(raw.code, 8).toUpperCase(), icao: stringValue(raw.icao, 8).toUpperCase(), nameZh: stringValue(raw.nameZh, 128), nameEn: stringValue(raw.nameEn, 128),
@@ -44,7 +44,8 @@ export function normalizeAirline(value: unknown, options: { submission?: boolean
     symbolLogoResourcePath: optionalString(raw.symbolLogoResourcePath), brandColors: { primary: hexColor(colors.primary), contrast: hexColor(colors.contrast) },
   };
   if (!/^[A-Z0-9]{2,3}$/.test(airline.code) || (airline.icao !== '' && !/^[A-Z]{3}$/.test(airline.icao)) || !(airline.nameZh || airline.nameEn)) throw new DomainValidationError(['airline identifiers and name are invalid']);
-  assertStableResourcePath(airline.horizontalLogoResourcePath, 'airline.horizontalLogoResourcePath'); assertStableResourcePath(airline.horizontalDarkLogoResourcePath, 'airline.horizontalDarkLogoResourcePath'); assertStableResourcePath(airline.symbolLogoResourcePath, 'airline.symbolLogoResourcePath');
+  const assertResource = options.inboxDraft ? assertDraftResourcePath : assertStableResourcePath;
+  assertResource(airline.horizontalLogoResourcePath, 'airline.horizontalLogoResourcePath'); assertResource(airline.horizontalDarkLogoResourcePath, 'airline.horizontalDarkLogoResourcePath'); assertResource(airline.symbolLogoResourcePath, 'airline.symbolLogoResourcePath');
   return airline;
 }
 
@@ -74,17 +75,17 @@ function normalizeElectronic(value: unknown, hasResource: boolean): ElectronicBo
   return { schemaVersion: 1, extraction: { crop: crop as unknown as NonNullable<ElectronicBoardingPassPresentation['extraction']>['crop'], ...(presetName === undefined ? {} : { presetName }) } };
 }
 
-export function normalizeFlight(value: unknown, defaults: { id: () => string; now: () => string }, options: { submission?: boolean } = {}): FlightRecord {
+export function normalizeFlight(value: unknown, defaults: { id: () => string; now: () => string }, options: { submission?: boolean; inboxDraft?: boolean } = {}): FlightRecord {
   const raw = object(value, 'flight');
   for (const legacy of ['boardingPassPrimaryColor', 'boardingPassContrastColor']) if (Object.hasOwn(raw, legacy)) throw new DomainValidationError([`flight.${legacy} is no longer supported; use boardingPassColor`]);
   const layoutsRaw = raw.paperBoardingPassLayouts === undefined ? {} : object(raw.paperBoardingPassLayouts, 'paperBoardingPassLayouts');
   assertAllowed(layoutsRaw, ['paperBoardingPassFront', 'paperBoardingPassBack'], 'paperBoardingPassLayouts');
   for (const field of ['paperBoardingPassFrontResourcePath', 'paperBoardingPassBackResourcePath', 'electronicBoardingPassResourcePath'] as const) {
     if (options.submission && raw[field] !== undefined && raw[field] !== null && typeof raw[field] !== 'string') throw new DomainValidationError([`flight.${field} must be null or a resource path`]);
-    if (options.submission && typeof raw[field] === 'string') assertStableResourcePath(raw[field], `flight.${field}`);
+    if (options.submission && typeof raw[field] === 'string') (options.inboxDraft ? assertDraftResourcePath : assertStableResourcePath)(raw[field], `flight.${field}`);
   }
   if (options.submission && raw.attachmentResourcePaths !== undefined && (!Array.isArray(raw.attachmentResourcePaths) || raw.attachmentResourcePaths.length > 32 || raw.attachmentResourcePaths.some((path) => typeof path !== 'string'))) throw new DomainValidationError(['flight.attachmentResourcePaths must be an array of at most 32 resource paths']);
-  if (options.submission && Array.isArray(raw.attachmentResourcePaths)) raw.attachmentResourcePaths.forEach((path) => assertStableResourcePath(path as string, 'flight attachment'));
+  if (options.submission && Array.isArray(raw.attachmentResourcePaths)) raw.attachmentResourcePaths.forEach((path) => (options.inboxDraft ? assertDraftResourcePath : assertStableResourcePath)(path as string, 'flight attachment'));
   const front = optionalString(raw.paperBoardingPassFrontResourcePath), back = optionalString(raw.paperBoardingPassBackResourcePath), electronicPath = optionalString(raw.electronicBoardingPassResourcePath);
   const layouts: NonNullable<FlightRecord['paperBoardingPassLayouts']> = {};
   for (const slot of ['paperBoardingPassFront', 'paperBoardingPassBack'] as const) if (layoutsRaw[slot] !== undefined) {
@@ -92,7 +93,8 @@ export function normalizeFlight(value: unknown, defaults: { id: () => string; no
     layouts[slot] = parsePaperLayout(layoutsRaw[slot], slot);
   }
   const attachments = stringList(raw.attachmentResourcePaths, 32, 512);
-  assertStableResourcePath(front, 'flight front resource'); assertStableResourcePath(back, 'flight back resource'); assertStableResourcePath(electronicPath, 'flight electronic resource'); attachments.forEach((path) => assertStableResourcePath(path, 'flight attachment'));
+  const assertResource = options.inboxDraft ? assertDraftResourcePath : assertStableResourcePath;
+  assertResource(front, 'flight front resource'); assertResource(back, 'flight back resource'); assertResource(electronicPath, 'flight electronic resource'); attachments.forEach((path) => assertResource(path, 'flight attachment'));
   const registration = optionalString(raw.registration, 64)?.toUpperCase() ?? null;
   const flight: FlightRecord = {
     id: stringValue(raw.id, 64) || defaults.id(), flightNumber: stringValue(raw.flightNumber, 12), airlineCode: stringValue(raw.airlineCode, 8).toUpperCase(), departureAirport: stringValue(raw.departureAirport, 8).toUpperCase(), arrivalAirport: stringValue(raw.arrivalAirport, 8).toUpperCase(),

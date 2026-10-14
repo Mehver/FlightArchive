@@ -13,7 +13,7 @@ import type { Airport } from '../api/types';
 import { displayFlightNumber } from '../utils/format';
 import { useTranslation } from '../i18n';
 import { BoardingPassFrame, DEFAULT_FRAME_ASPECT } from '../boardingpass/BoardingPassFrame';
-import { slotLayout, slotResourcePath } from '../boardingpass/passPresentation';
+import { BOARDING_PASS_PREVIEW_DIMENSION, sharedSlotQualityCrop, slotLayout, slotResourcePath } from '../boardingpass/passPresentation';
 import {
   airlineLabel,
   clickableRecordProps,
@@ -79,8 +79,10 @@ export function FlightGridView({ flights, airlineNames, airlines, airports, onOp
                 resourcePath={slotResourcePath(flight, 'paperBoardingPassFront')}
                 layout={slotLayout(flight, 'paperBoardingPassFront')}
                 aspectRatio={DEFAULT_FRAME_ASPECT}
-                compact
-                layered={false}
+                 compact
+                 layered={false}
+                  maxDimension={BOARDING_PASS_PREVIEW_DIMENSION}
+                  qualityCrop={sharedSlotQualityCrop(flight, 'paperBoardingPassFront')}
               />
              </Box>
              <Box sx={{ p: 1.5, pt: 1.25, display: 'flex', flexDirection: 'column', gap: 0.75, flex: '1 1 auto', minWidth: 0 }}>

@@ -6,9 +6,10 @@ import { createRoot } from 'react-dom/client';
 import App from './App';
 import { LanguageProvider } from './i18n';
 import { ResourceMappingProvider } from './rfg/ResourceMappingProvider';
+import { FeedbackProvider } from './feedback/FeedbackCenter';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <LanguageProvider><ResourceMappingProvider><App /></ResourceMappingProvider></LanguageProvider>
+    <LanguageProvider><FeedbackProvider><ResourceMappingProvider><App /></ResourceMappingProvider></FeedbackProvider></LanguageProvider>
   </StrictMode>,
 );

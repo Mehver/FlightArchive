@@ -14,7 +14,7 @@ function Probe({ path, enabled = true, centerX = 10 }: { path: string; enabled?:
   const image = useBrowserImage(path, { crop: { centerX, centerY: 10, width: 10, height: 10, rotationDegrees: 0 }, enabled });
   return <output data-error={image.status === 'failed' ? String(image.error) : ''}>{image.src ?? image.status}</output>;
 }
-afterEach(() => { cleanup(); mocks.render.mockReset(); mocks.release.mockReset(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); mocks.render.mockReset(); mocks.release.mockReset(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('useBrowserImage', () => {
   it('fails closed instead of exposing /res after any raster display failure', async () => {
@@ -58,12 +58,27 @@ describe('useBrowserImage', () => {
     const view = render(<StrictMode><Probe path="strict.jpg" /></StrictMode>); await waitFor(() => expect(screen.getByText('blob:second')).toBeTruthy());
     expect(mocks.release).toHaveBeenCalledWith(expect.objectContaining({ url: 'blob:first' })); view.unmount(); expect(mocks.release).toHaveBeenCalledWith(expect.objectContaining({ url: 'blob:second' }));
   });
+
+  it('does not start while the browser document is hidden and retains a ready URL when hidden later', async () => {
+    let visibility: DocumentVisibilityState = 'hidden';
+    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility);
+    mocks.render.mockResolvedValue({ url: 'blob:visible-tab', width: 1, height: 1, type: 'image/webp' });
+    render(<Probe path="tab.jpg" />);
+    expect(mocks.render).not.toHaveBeenCalled();
+    visibility = 'visible';
+    await act(async () => document.dispatchEvent(new Event('visibilitychange')));
+    await waitFor(() => expect(screen.getByText('blob:visible-tab')).toBeTruthy());
+    visibility = 'hidden';
+    await act(async () => document.dispatchEvent(new Event('visibilitychange')));
+    expect(screen.getByText('blob:visible-tab')).toBeTruthy();
+    expect(mocks.release).not.toHaveBeenCalled();
+  });
 });
 
 describe('near-viewport request gate', () => {
   it('does not request any of 92 below-viewport rasters until visibility triggers', async () => {
     const callbacks: IntersectionObserverCallback[] = [];
-    class Observer { constructor(callback: IntersectionObserverCallback) { callbacks.push(callback); } observe() {} disconnect() {} unobserve() {} takeRecords() { return []; } root = null; rootMargin = '250px 0px'; thresholds = [0]; }
+    class Observer { constructor(callback: IntersectionObserverCallback) { callbacks.push(callback); } observe() {} disconnect() {} unobserve() {} takeRecords() { return []; } root = null; rootMargin = '0px'; thresholds = [0]; }
     vi.stubGlobal('IntersectionObserver', Observer);
     mocks.render.mockResolvedValue({ url: 'blob:visible', width: 1, height: 1, type: 'image/webp' });
     function Lazy({ index }: { index: number }) { const visibility = useNearViewport<HTMLDivElement>(); const image = useBrowserImage(`item-${index}.jpg`, { enabled: visibility.enabled }); return <div ref={visibility.ref}>{image.status}</div>; }
@@ -73,9 +88,9 @@ describe('near-viewport request gate', () => {
     await waitFor(() => expect(mocks.render).toHaveBeenCalledOnce());
   });
 
-  it('stays enabled after first intersection so exit and re-entry do not rerender or release', async () => {
+  it('aborts pending work on exit, but retains a ready URL across exit and re-entry', async () => {
     let callback!: IntersectionObserverCallback;
-    class Observer { constructor(next: IntersectionObserverCallback) { callback = next; } observe() {} disconnect() {} unobserve() {} takeRecords() { return []; } root = null; rootMargin = '250px 0px'; thresholds = [0]; }
+    class Observer { constructor(next: IntersectionObserverCallback) { callback = next; } observe() {} disconnect() {} unobserve() {} takeRecords() { return []; } root = null; rootMargin = '0px'; thresholds = [0]; }
     vi.stubGlobal('IntersectionObserver', Observer);
     mocks.render.mockResolvedValue({ url: 'blob:sticky', width: 1, height: 1, type: 'image/webp' });
     function Lazy() { const visibility = useNearViewport<HTMLDivElement>(); const image = useBrowserImage('sticky.jpg', { enabled: visibility.enabled }); return <div ref={visibility.ref}>{image.src ?? image.status}</div>; }
@@ -88,5 +103,18 @@ describe('near-viewport request gate', () => {
     expect(mocks.release).not.toHaveBeenCalled();
     view.unmount();
     expect(mocks.release).toHaveBeenCalledWith(expect.objectContaining({ url: 'blob:sticky' }));
+  });
+
+  it('cancels an unfinished request while disabled and starts a fresh one when active again', async () => {
+    let firstSignal: AbortSignal | undefined;
+    mocks.render.mockImplementationOnce(({ signal }: { signal?: AbortSignal }) => { firstSignal = signal; return new Promise(() => undefined); })
+      .mockResolvedValueOnce({ url: 'blob:focused', width: 1, height: 1, type: 'image/webp' });
+    const view = render(<Probe path="queued.jpg" />);
+    await waitFor(() => expect(mocks.render).toHaveBeenCalledOnce());
+    view.rerender(<Probe path="queued.jpg" enabled={false} />);
+    expect(firstSignal?.aborted).toBe(true);
+    view.rerender(<Probe path="queued.jpg" enabled />);
+    await waitFor(() => expect(screen.getByText('blob:focused')).toBeTruthy());
+    expect(mocks.render).toHaveBeenCalledTimes(2);
   });
 });

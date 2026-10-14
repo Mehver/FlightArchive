@@ -21,15 +21,14 @@ import { cleanup, render, screen, within } from '@testing-library/react';
 import type { Catalogs, FlightRecord } from '../api/types';
 import { LanguageProvider } from '../i18n';
 
-vi.mock('../resources/useBrowserImage', () => ({
-  useBrowserImage: (path: string | null, options?: { crop?: unknown }) => path
+const { mockUseBrowserImage } = vi.hoisted(() => ({ mockUseBrowserImage: vi.fn((path: string | null, options?: { crop?: unknown }) => path
     ? { status: 'ready', src: path.endsWith('.svg') ? `/res/${path}` : `${options?.crop ? 'blob:crop-' : 'blob:thumbnail-'}${path}` }
-    : { status: 'failed', src: null },
-}));
+    : { status: 'failed', src: null }) }));
+vi.mock('../resources/useBrowserImage', () => ({ useBrowserImage: mockUseBrowserImage }));
 
 import { FlightDetailDialog } from './FlightDetailDialog';
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); mockUseBrowserImage.mockClear(); });
 
 const FLIGHT: FlightRecord = {
   id: 'f-1',
@@ -219,6 +218,24 @@ describe('FlightDetailDialog files', () => {
     expect(images).toHaveLength(1);
     expect(images[0].getAttribute('src')).toBe('blob:thumbnail-objects/front.png');
     expect(within(list).getAllByTestId('InsertDriveFileOutlinedIcon')).toHaveLength(2);
+  });
+
+  it('gives a shared front/back image row the highest required saved-crop quality reference', () => {
+    const frontCrop = { centerX: 7000, centerY: 5000, width: 11_200, height: 4200, rotationDegrees: 0 };
+    const backCrop = { centerX: 7000, centerY: 5000, width: 5600, height: 2100, rotationDegrees: 0 };
+    renderWithFiles({
+      ...FLIGHT,
+      paperBoardingPassFrontResourcePath: 'objects/both.png',
+      paperBoardingPassBackResourcePath: 'objects/both.png',
+      attachmentResourcePaths: ['objects/both.png'],
+      paperBoardingPassLayouts: {
+        paperBoardingPassFront: { schemaVersion: 1, algorithm: 'adaptive', crop: frontCrop, templateId: 'bp-247.svg', placement: { scale: 1, rotationDegrees: 0, offsetX: 0, offsetY: 0 } },
+        paperBoardingPassBack: { schemaVersion: 1, algorithm: 'adaptive', crop: backCrop, templateId: 'bp-247.svg', placement: { scale: 1, rotationDegrees: 0, offsetX: 0, offsetY: 0 } },
+      },
+    });
+    expect(mockUseBrowserImage).toHaveBeenCalledWith('objects/both.png', expect.objectContaining({ crop: frontCrop, maxDimension: 512 }));
+    expect(mockUseBrowserImage).toHaveBeenCalledWith('objects/both.png', expect.objectContaining({ crop: backCrop, maxDimension: 512 }));
+    expect(mockUseBrowserImage).toHaveBeenCalledWith('objects/both.png', expect.objectContaining({ qualityCrop: { width: 5600, height: 2100 }, maxDimension: 80 }));
   });
 
    it('uses an image preview and keeps the saved-layout status for a prepared electronic pass', () => {

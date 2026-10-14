@@ -3,8 +3,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-/** Starts raster work once an element first approaches the viewport. The gate
- * is sticky so scrolling away never tears down an already loaded image. */
+/** Allows pending raster work only while the element is actually in view.
+ * Loaded URL retention belongs to the image hook, not this visibility gate. */
 export function useNearViewport<T extends Element>() {
   const ref = useRef<T | null>(null);
   const [enabled, setEnabled] = useState(() => typeof IntersectionObserver === 'undefined');
@@ -12,11 +12,8 @@ export function useNearViewport<T extends Element>() {
     const element = ref.current;
     if (!element || typeof IntersectionObserver === 'undefined') { setEnabled(true); return; }
     const observer = new IntersectionObserver(([entry]) => {
-      if (entry?.isIntersecting) {
-        setEnabled(true);
-        observer.disconnect();
-      }
-    }, { rootMargin: '250px 0px' });
+      setEnabled(Boolean(entry?.isIntersecting));
+    }, { rootMargin: '0px' });
     observer.observe(element);
     return () => observer.disconnect();
   }, []);

@@ -22,7 +22,7 @@ vi.mock('../domain/BusinessDataProvider', () => ({
 vi.mock('../rfg/api', () => ({ resourceUrl: (path: string) => `/res/${path}` }));
 vi.mock('../resources/browserImageRenderer', () => ({ loadStudioSource: mocks.loadStudioSource, assertDecodedLimits: vi.fn() }));
 vi.mock('../state/AppState', () => ({
-  useAppState: () => ({ notify: vi.fn(), showError: vi.fn() }),
+  useAppState: () => ({ notify: vi.fn(), showError: vi.fn(), reportFailure: vi.fn() }),
 }));
 
 const imageSize = { width: 400, height: 200 };

@@ -12,12 +12,12 @@ afterEach(cleanup);
 
 describe('mappingStatusColor', () => {
   it('keeps one semantic color convention for every mapping state', () => {
-    expect(mappingStatusColor('missing')).toBe('error');
-    expect(mappingStatusColor('inbox')).toBe('warning');
-    expect(mappingStatusColor('paired')).toBe('success');
-    expect(mappingStatusColor('paired', true)).toBe('warning');
-    expect(mappingStatusColor('ignored')).toBe('default');
-    expect(mappingStatusColor('local_only')).toBe('default');
+    expect((['paired', 'inbox', 'ignored', 'missing'] as const).map((kind) => [kind, mappingStatusColor(kind)])).toEqual([
+      ['paired', 'success'],
+      ['inbox', 'warning'],
+      ['ignored', 'default'],
+      ['missing', 'error'],
+    ]);
   });
 });
 

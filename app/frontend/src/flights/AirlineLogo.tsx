@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
-import { Box, CircularProgress, useTheme } from '@mui/material';
+import { Box, useTheme } from '@mui/material';
 import { useBrowserImage } from '../resources/useBrowserImage';
 import { useNearViewport } from '../resources/useNearViewport';
 import { useTranslation } from '../i18n';
+import { ImageLoadingIndicator } from '../resources/ImageLoadingIndicator';
 
 function LogoImage({ resourcePath, alt, eager = false, enabled = true, onFailure, sx }: { resourcePath: string; alt: string; eager?: boolean; enabled?: boolean; onFailure(): void; sx: object }) {
   const { t } = useTranslation();
@@ -15,7 +16,7 @@ function LogoImage({ resourcePath, alt, eager = false, enabled = true, onFailure
   useEffect(() => { if (image.status === 'failed') onFailure(); }, [image.status, onFailure]);
   return <>
     {image.status === 'ready' ? <Box component="img" src={image.src} alt={alt} aria-hidden={alt ? undefined : true} loading={eager ? 'eager' : 'lazy'} onLoad={() => setElementLoaded(true)} onError={onFailure} sx={{ ...sx, opacity: elementLoaded ? 1 : 0 }} /> : null}
-    {enabled && (image.status === 'loading' || image.status === 'ready' && !elementLoaded) ? <Box data-testid="airline-logo-loading" sx={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', pointerEvents: 'none' }}><CircularProgress size={18} aria-label={t('loading')} /></Box> : null}
+    <ImageLoadingIndicator loading={enabled && (image.status === 'loading' || image.status === 'ready' && !elementLoaded)} label={t('loading')} />
   </>;
 }
 

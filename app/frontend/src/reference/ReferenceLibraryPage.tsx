@@ -14,7 +14,7 @@
  * the standard forced-delete flow for referenced entries).
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import {
   Box,
   Button,
@@ -40,7 +40,10 @@ import EditIcon from '@mui/icons-material/Edit';
 import type { AircraftType, Airline, Airport, FlightRecord } from '../api/types';
 import { useAppState } from '../state/AppState';
 import { useBusinessData } from '../domain/BusinessDataProvider';
+import { PreparedCommitError, type PreparedBusinessMutation } from '../domain/BusinessDataProvider';
 import { DomainConflictError } from '../domain/commands';
+import { applyResourceRetargets, planResourceTransitions } from '../domain/resourceReferences';
+import { ResourceMappingMutationError, useOptionalResourceMapping } from '../rfg/ResourceMappingProvider';
 import { PageHeader } from '../components/PageHeader';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { EmptyState, LoadingState } from '../components/States';
@@ -65,6 +68,10 @@ interface CatalogRow {
   entry: CatalogEntry;
   /** Flight-derived rows are deliberately never persisted until their edit is saved. */
   derived: boolean;
+}
+
+class CoordinationReportedError extends Error {
+  constructor(public readonly original: unknown) { super('resource coordination failure was reported'); this.name = 'CoordinationReportedError'; }
 }
 
 function unlistedEntry(kind: CatalogKind, code: string): CatalogEntry {
@@ -96,8 +103,9 @@ export function stringSuggestions(values: readonly (string | null)[], collator: 
 
 export function ReferenceLibraryPage() {
   const { t, language } = useTranslation();
-  const { catalogs, notify, showError } = useAppState();
+  const { catalogs, notify, reportFailure } = useAppState();
   const business = useBusinessData();
+  const resources = useOptionalResourceMapping();
   const [activeTab, setActiveTab] = useState<LibraryKind>('flights');
   const kind: CatalogKind = activeTab === 'flights' ? 'airlines' : activeTab;
   const [query, setQuery] = useState('');
@@ -116,6 +124,9 @@ export function ReferenceLibraryPage() {
   const [savingFlight, setSavingFlight] = useState(false);
   const [deletingFlight, setDeletingFlight] = useState<FlightRecord | null>(null);
   const [bulkDeletingFlights, setBulkDeletingFlights] = useState(false);
+  const [mutationBusy, setMutationBusy] = useState(false);
+  const mutationBusyRef = useRef(false);
+  const selectionAnchorRef = useRef<string | null>(null);
   const [sorts, setSorts] = useState<Record<LibraryKind, SortState>>({
     flights: { key: 'date', direction: 'desc' },
     airlines: null,
@@ -133,6 +144,7 @@ export function ReferenceLibraryPage() {
   );
 
   const requestSort = (key: string) => {
+    selectionAnchorRef.current = null;
     setSorts((current) => {
       const active = current[activeTab];
       return {
@@ -319,23 +331,33 @@ export function ReferenceLibraryPage() {
 
   const visibleKeys = useMemo(
     () => activeTab === 'flights'
-      ? filteredFlights.map((flight) => flight.id)
-      : filtered.filter((row) => !row.derived).map(({ entry }) => catalogEntryKey(kind, entry)),
-    [activeTab, filtered, filteredFlights, kind],
+      ? sortedFlights.map((flight) => flight.id)
+      : sortedCatalogRows.filter((row) => !row.derived).map(({ entry }) => catalogEntryKey(kind, entry)),
+    [activeTab, kind, sortedCatalogRows, sortedFlights],
   );
   const allVisibleSelected = visibleKeys.length > 0 && visibleKeys.every((key) => selected.has(key));
   const someVisibleSelected = visibleKeys.some((key) => selected.has(key));
 
-  const toggleSelected = (key: string) => {
+  const toggleSelected = (key: string, shiftKey = false) => {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
+      const anchor = selectionAnchorRef.current;
+      const anchorIndex = anchor === null ? -1 : visibleKeys.indexOf(anchor);
+      const targetIndex = visibleKeys.indexOf(key);
+      if (shiftKey && anchorIndex >= 0 && targetIndex >= 0) {
+        const start = Math.min(anchorIndex, targetIndex), end = Math.max(anchorIndex, targetIndex);
+        for (const visibleKey of visibleKeys.slice(start, end + 1)) next.add(visibleKey);
+      } else {
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        selectionAnchorRef.current = key;
+      }
       return next;
     });
   };
 
   const toggleAllVisible = () => {
+    selectionAnchorRef.current = null;
     setSelected((prev) => {
       const next = new Set(prev);
       if (allVisibleSelected) for (const key of visibleKeys) next.delete(key);
@@ -344,14 +366,76 @@ export function ReferenceLibraryPage() {
     });
   };
 
+  useEffect(() => { selectionAnchorRef.current = null; }, [activeTab, query]);
+
+  const beginMutation = () => {
+    if (mutationBusyRef.current) return false;
+    mutationBusyRef.current = true; setMutationBusy(true); return true;
+  };
+  const endMutation = () => { mutationBusyRef.current = false; setMutationBusy(false); };
+
+  const reportCoordinationFailure = (operation: string, records: readonly string[], error: unknown, resourceAttempts: number, compensationFailed = false, stage = 'coordination') => {
+    const message = error instanceof Error ? error.message : String(error);
+    const rollbackFailedDocs = error instanceof PreparedCommitError ? error.rollbackFailedDocs : [];
+    const failedCompensation = compensationFailed || rollbackFailedDocs.length > 0 || (error instanceof ResourceMappingMutationError && error.compensationState === 'failed');
+    const code = failedCompensation ? 'resource-coordination-compensation-failed' : 'resource-coordination-failed';
+    reportFailure(error, {
+      fallback: t(failedCompensation ? 'resourceCompensationFailed' : 'operationFailed'),
+      context: { action: operation, resource: records.join(', '), form: t('flightReference') },
+      activity: {
+        source: 'frontend-resource-coordinator', kind: 'resource', severity: 'error', state: 'failed', code,
+        details: { operation, records: [...records], message, stage, resourceAttempts, compensationFailed: failedCompensation, rollbackFailedDocs },
+      },
+    });
+  };
+
+  const commitCoordinated = async <T,>(
+    prepared: PreparedBusinessMutation<T>,
+    touchedOwners: ReadonlySet<string>,
+    resolveResult: (data: typeof prepared.next) => T,
+    operation: string,
+    records: readonly string[],
+  ): Promise<T> => {
+    let mappingRecovery: Awaited<ReturnType<NonNullable<typeof resources>['transition']>>['recovery'] | null = null;
+    let resourceAttempts = 0; let stage = 'planning';
+    try {
+      const transitions = planResourceTransitions(prepared.before, prepared.next, touchedOwners);
+      if (transitions.length && !resources) throw new Error('resource mapping provider is unavailable');
+      stage = 'resource';
+      let actualTransitions = transitions;
+      if (transitions.length) {
+        const result = await resources!.transition(transitions); mappingRecovery = result.recovery; resourceAttempts = result.attempts;
+        actualTransitions = result.retargets;
+      }
+      const next = applyResourceRetargets(prepared.next, actualTransitions);
+      stage = 'archive';
+      return await business.commitPrepared({ ...prepared, next, result: resolveResult(next) });
+    } catch (error) {
+      let compensationFailed = false;
+      if (mappingRecovery && resources) {
+        try { await resources.restore(mappingRecovery); } catch { compensationFailed = true; }
+      }
+      const attempts = error instanceof ResourceMappingMutationError ? error.attempts : resourceAttempts;
+      reportCoordinationFailure(operation, records, error, attempts, compensationFailed, stage);
+      throw new CoordinationReportedError(error);
+    }
+  };
+
   const saveEntry = async (entry: Record<string, unknown>) => {
+    if (!beginMutation()) return;
     setSaving(true);
     try {
       const key = editing
         ? catalogEntryKey(kind, editing.entry)
         : catalogEntryPayloadKey(kind, entry);
-      business.upsertCatalogEntry(kind, key, entry);
-      await business.saveDocument(kind === 'aircraft-types' ? 'aircraft-types.json' : `${kind}.json`);
+      const prepared = business.prepareUpsertCatalogEntry(kind, key, entry);
+      await commitCoordinated(
+        prepared,
+        new Set(kind === 'airlines' ? [`airline:${key.trim().toUpperCase()}`] : []),
+        (data) => (kind === 'airlines' ? data.airlines : kind === 'airports' ? data.airports : data.aircraftTypes)
+          .find((item) => ('code' in item ? item.code : item.icao) === key.trim().toUpperCase())!,
+        'save-catalog-entry', [key],
+      );
       if (editing) {
         notify(t(editing.derived ? 'catalogEntryAdded' : 'catalogEntryUpdated'), 'success', { resource: catalogEntryKey(kind, editing.entry), form: t('flightReference') });
       } else {
@@ -360,17 +444,19 @@ export function ReferenceLibraryPage() {
       setDialogOpen(false);
       setEditing(null);
     } catch (error) {
-      showError(error, t('couldNotSaveCatalog'), { action: t('save'), form: t('flightReference') });
+      if (!(error instanceof CoordinationReportedError)) reportFailure(error, { fallback: t('couldNotSaveCatalog'), context: { action: t('save'), form: t('flightReference') } });
     } finally {
       setSaving(false);
+      endMutation();
     }
   };
 
   const deleteEntry = async (force = false) => {
-    if (!deleting) return;
+    if (!deleting || !beginMutation()) return;
     try {
-      business.deleteCatalogEntries(kind, [catalogEntryKey(kind, deleting)], force);
-      await business.saveDocument(kind === 'aircraft-types' ? 'aircraft-types.json' : `${kind}.json`);
+      const key = catalogEntryKey(kind, deleting);
+      const prepared = business.prepareDeleteCatalogEntries(kind, [key], force);
+      await commitCoordinated(prepared, new Set(), () => prepared.result, 'delete-catalog-entry', [key]);
       notify(t('catalogEntryDeleted', { key: catalogEntryKey(kind, deleting) }), 'success', { resource: catalogEntryKey(kind, deleting), form: t('flightReference') });
       setDeleting(null);
       setDeleteForce(false);
@@ -378,85 +464,109 @@ export function ReferenceLibraryPage() {
       if (error instanceof DomainConflictError && !force) {
         setDeleteForce(true);
       } else {
-        showError(error, t('couldNotDeleteCatalog'), { action: t('delete'), resource: catalogEntryKey(kind, deleting), form: t('flightReference') });
+        if (!(error instanceof CoordinationReportedError)) reportFailure(error, { fallback: t('couldNotDeleteCatalog'), context: { action: t('delete'), resource: catalogEntryKey(kind, deleting), form: t('flightReference') } });
       }
-    }
+    } finally { endMutation(); }
   };
 
-  // Batch deletion is never optimistic: the table only changes after the
-  // server confirms, and a 409 switches the same dialog to the forced
-  // confirmation exactly like the single-row flow.
+  // Batch deletion is staged: local domain conflict validation happens before
+  // resource I/O, and rows publish only after the prepared archive commit.
   const deleteSelectedEntries = async (force = false) => {
     const keys = [...selected];
-    if (keys.length === 0) return;
+    if (keys.length === 0 || !beginMutation()) return;
     try {
-      const deleted = business.deleteCatalogEntries(kind, keys, force);
-      await business.saveDocument(kind === 'aircraft-types' ? 'aircraft-types.json' : `${kind}.json`);
-      notify(t('catalogEntriesDeleted', { count: deleted.length }), 'success', { form: t('flightReference') });
-      setSelected(new Set());
+      // Validate the complete request first so the existing referenced-entry
+      // confirmation occurs before any resource or archive mutation.
+      business.prepareDeleteCatalogEntries(kind, keys, force);
+      if (kind === 'airlines') {
+        let deletedCount = 0;
+        for (const key of keys) {
+          try {
+            const prepared = business.prepareDeleteCatalogEntries(kind, [key], force);
+            await commitCoordinated(prepared, new Set(), () => prepared.result, 'delete-airline', [key]);
+            deletedCount++;
+            setSelected((current) => { const next = new Set(current); next.delete(key); return next; });
+          } catch (error) {
+            if (!(error instanceof CoordinationReportedError)) reportFailure(error, { fallback: t('couldNotDeleteCatalog'), context: { action: t('delete'), resource: key, form: t('flightReference') } });
+          }
+        }
+        if (deletedCount) notify(t('catalogEntriesDeleted', { count: deletedCount }), 'success', { form: t('flightReference') });
+      } else {
+        const prepared = business.prepareDeleteCatalogEntries(kind, keys, force);
+        const deleted = await commitCoordinated(prepared, new Set(), () => prepared.result, 'delete-catalog-entries', keys);
+        notify(t('catalogEntriesDeleted', { count: deleted.length }), 'success', { form: t('flightReference') });
+        setSelected(new Set());
+      }
       setBulkDeleting(false);
       setBulkDeleteForce(false);
     } catch (error) {
       if (error instanceof DomainConflictError && !force) {
         setBulkDeleteForce(true);
       } else {
-        showError(error, t('couldNotDeleteCatalog'), { action: t('delete'), form: t('flightReference') });
+        if (!(error instanceof CoordinationReportedError)) reportFailure(error, { fallback: t('couldNotDeleteCatalog'), context: { action: t('delete'), form: t('flightReference') } });
       }
-    }
+    } finally { endMutation(); }
   };
 
   const saveFlight = async (payload: Partial<FlightRecord>) => {
+    if (!beginMutation()) return;
     setSavingFlight(true);
     try {
       if (editingFlight) {
-        const updated = business.updateFlight(editingFlight.id, payload);
-        await business.saveDocument('flights.json');
+        const prepared = business.prepareUpdateFlight(editingFlight.id, payload);
+        const updated = await commitCoordinated(prepared, new Set([`flight:${editingFlight.id}`]),
+          (data) => data.flights.find((flight) => flight.id === editingFlight.id)!, 'save-flight', [editingFlight.id]);
         notify(t('flightUpdated'), 'success', { resource: editingFlight.id, form: t('flightReference') });
         setEditingFlight(updated);
       } else {
-        const created = business.createFlight(payload);
-        // Establish edit identity before persistence completes. If the queued
-        // write fails, another Save updates this same working record instead
-        // of creating a duplicate.
+        const prepared = business.prepareCreateFlight(payload);
+        const id = prepared.result.id;
+        const created = await commitCoordinated(prepared, new Set([`flight:${id}`]),
+          (data) => data.flights.find((flight) => flight.id === id)!, 'create-flight', [id]);
         setEditingFlight(created);
-        await business.saveDocument('flights.json');
         notify(t('flightAdded'), 'success', { resource: created.id, form: t('flightReference') });
       }
     } catch (error) {
-      showError(error, t('couldNotSaveFlight'), { action: t('save'), resource: editingFlight?.id, form: t('flightReference') });
+      if (!(error instanceof CoordinationReportedError)) reportFailure(error, { fallback: t('couldNotSaveFlight'), context: { action: t('save'), resource: editingFlight?.id, form: t('flightReference') } });
     } finally {
       setSavingFlight(false);
+      endMutation();
     }
   };
 
   const deleteOneFlight = async () => {
-    if (!deletingFlight) return;
+    if (!deletingFlight || !beginMutation()) return;
     try {
-      business.deleteFlight(deletingFlight.id);
-      await business.saveDocument('flights.json');
+      const prepared = business.prepareDeleteFlight(deletingFlight.id);
+      await commitCoordinated(prepared, new Set(), () => prepared.result, 'delete-flight', [deletingFlight.id]);
       notify(t('flightDeleted', { flightNumber: displayFlightNumber(deletingFlight.airlineCode, deletingFlight.flightNumber) }), 'success', { resource: deletingFlight.id, form: t('flightReference') });
       setDeletingFlight(null);
     } catch (error) {
-      showError(error, t('couldNotDeleteFlight'), { action: t('delete'), resource: deletingFlight.id, form: t('flightReference') });
-    }
+      if (!(error instanceof CoordinationReportedError)) reportFailure(error, { fallback: t('couldNotDeleteFlight'), context: { action: t('delete'), resource: deletingFlight.id, form: t('flightReference') } });
+    } finally { endMutation(); }
   };
 
   const deleteSelectedFlights = async () => {
     const ids = [...selected];
-    if (ids.length === 0) return;
+    if (ids.length === 0 || !beginMutation()) return;
     try {
       let deletedCount = 0;
       for (const id of ids) {
-        business.deleteFlight(id);
-        deletedCount++;
+        try {
+          const prepared = business.prepareDeleteFlight(id);
+          await commitCoordinated(prepared, new Set(), () => prepared.result, 'delete-flight', [id]);
+          deletedCount++;
+          setSelected((current) => { const next = new Set(current); next.delete(id); return next; });
+        } catch (error) {
+          if (!(error instanceof CoordinationReportedError)) reportFailure(error, { fallback: t('couldNotDeleteFlight'), context: { action: t('delete'), resource: id, form: t('flightReference') } });
+        }
       }
-      await business.saveDocument('flights.json');
-      notify(t('flightsDeleted', { count: deletedCount }), 'success', { form: t('flightReference') });
-      setSelected(new Set());
-    } catch (error) {
-      showError(error, t('couldNotDeleteFlight'), { action: t('delete'), form: t('flightReference') });
-    } finally {
+      if (deletedCount) notify(t('flightsDeleted', { count: deletedCount }), 'success', { form: t('flightReference') });
+      // Individual commits deliberately make partial success visible and keep
+      // only failed records selected.
       setBulkDeletingFlights(false);
+    } finally {
+      endMutation();
     }
   };
 
@@ -465,7 +575,7 @@ export function ReferenceLibraryPage() {
       <Checkbox
         size="small"
         checked={selected.has(key)}
-        onChange={() => toggleSelected(key)}
+        onChange={(event: ChangeEvent<HTMLInputElement>) => toggleSelected(key, Boolean((event.nativeEvent as MouseEvent).shiftKey))}
         slotProps={{ input: { 'aria-label': t('selectCatalogEntry', { key }) } }}
       />
     </TableCell>
@@ -519,6 +629,7 @@ export function ReferenceLibraryPage() {
         subtitle={`${t('flightReferenceSubtitle')} · ${t('referenceCount', { count: activeTab === 'flights' ? filteredFlights.length : filtered.length })}`}
         actions={
           <Button
+            disabled={mutationBusy}
             variant="contained"
             startIcon={<AddIcon />}
             onClick={() => {
@@ -562,6 +673,7 @@ export function ReferenceLibraryPage() {
         />
         {selected.size > 0 ? (
           <Button
+            disabled={mutationBusy}
             color="error"
             variant="outlined"
             startIcon={<DeleteIcon />}
@@ -791,6 +903,7 @@ export function ReferenceLibraryPage() {
         })}
         confirmLabel={t('delete')}
         danger
+        busy={mutationBusy}
         onConfirm={() => void deleteOneFlight()}
         onClose={() => setDeletingFlight(null)}
       />
@@ -800,6 +913,7 @@ export function ReferenceLibraryPage() {
         message={t('deleteFlightsMessage', { count: selected.size })}
         confirmLabel={t('delete')}
         danger
+        busy={mutationBusy}
         onConfirm={() => void deleteSelectedFlights()}
         onClose={() => setBulkDeletingFlights(false)}
       />
@@ -809,6 +923,7 @@ export function ReferenceLibraryPage() {
         message={t('deleteCatalogMessage', { key: deleting ? catalogEntryKey(kind, deleting) : '' })}
         confirmLabel={t('delete')}
         danger
+        busy={mutationBusy}
         onConfirm={() => void deleteEntry()}
         onClose={() => setDeleting(null)}
       />
@@ -818,6 +933,7 @@ export function ReferenceLibraryPage() {
         message={t('entryReferencedMessage', { key: deleting ? catalogEntryKey(kind, deleting) : '' })}
         confirmLabel={t('deleteAnyway')}
         danger
+        busy={mutationBusy}
         onConfirm={() => void deleteEntry(true)}
         onClose={() => {
           setDeleting(null);
@@ -830,6 +946,7 @@ export function ReferenceLibraryPage() {
         message={t('deleteCatalogSelectionMessage', { count: selected.size })}
         confirmLabel={t('delete')}
         danger
+        busy={mutationBusy}
         onConfirm={() => void deleteSelectedEntries()}
         onClose={() => setBulkDeleting(false)}
       />
@@ -839,6 +956,7 @@ export function ReferenceLibraryPage() {
         message={t('entriesReferencedMessage', { count: selected.size })}
         confirmLabel={t('deleteAnyway')}
         danger
+        busy={mutationBusy}
         onConfirm={() => void deleteSelectedEntries(true)}
         onClose={() => {
           setBulkDeleting(false);

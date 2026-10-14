@@ -35,6 +35,7 @@ async function waitForVite() {
 const browser = await chromium.launch({ executablePath, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
 const page = await browser.newPage();
 const resources = new Map(); const relayGets = new Map(); const originalGets = new Map();
+let activeSlowGets = 0; let maximumSlowGets = 0;
 try {
   await waitForVite();
   await page.route('**/api/thumbnails/**', async (route) => {
@@ -49,7 +50,11 @@ try {
     };
     if (request.method() === 'HEAD') return route.fulfill({ status: 200, headers });
     relayGets.set(`${virtualPath}@${scale}`, (relayGets.get(`${virtualPath}@${scale}`) ?? 0) + 1);
-    if (resource.delay) await new Promise((resolve) => setTimeout(resolve, resource.delay));
+    if (resource.delay) {
+      if (virtualPath.startsWith('slow/')) { activeSlowGets += 1; maximumSlowGets = Math.max(maximumSlowGets, activeSlowGets); }
+      await new Promise((resolve) => setTimeout(resolve, resource.delay));
+      if (virtualPath.startsWith('slow/')) activeSlowGets -= 1;
+    }
     return route.fulfill({ status: 200, headers, body: Buffer.from(derivative.bytes) });
   });
   await page.route('**/res/**', async (route) => {
@@ -79,6 +84,7 @@ try {
   resources.set('large.jpg', { width: 14_000, height: 10_000, sourceBytes: 500_000, etag: '"large"', derivatives: scales([[0.015625, fixtures.tinyLarge], [0.0625, fixtures.largeSixteenth], [0.125, fixtures.largeEighth]]) });
   resources.set('oriented.jpg', { width: 600, height: 800, sourceBytes: 100_000, etag: '"oriented"', derivatives: scales([[0.015625, fixtures.tinyOriented], [0.5, fixtures.orientedHalf], [1, fixtures.orientedFull]]) });
   resources.set('cancel.img', { ...resources.get('png.img'), etag: '"cancel"', delay: 250 });
+  for (let index = 0; index < 5; index += 1) resources.set(`slow/${index}.img`, { ...resources.get('png.img'), etag: `"slow-${index}"`, delay: 150 });
 
   const formats = await page.evaluate(async () => {
     const { BrowserImageRenderer } = globalThis.__browserImageModule; const renderer = new BrowserImageRenderer(); const output = [];
@@ -99,7 +105,7 @@ try {
   const dominant = crop.pixels.map((rgb) => rgb.indexOf(Math.max(...rgb))); assert.deepEqual(dominant, [1, 0, 2, 0]);
 
   const large = await page.evaluate(async () => { const { BrowserImageRenderer } = globalThis.__browserImageModule; const renderer = new BrowserImageRenderer(); const result = await renderer.render({ virtualPath: 'large.jpg', crop: { centerX: 7260.99, centerY: 4927.5, width: 9540.97, height: 3897.07, rotationDegrees: -8 }, maxDimension: 1024 }); renderer.dispose(); return { width: result.width, height: result.height }; });
-  assert.deepEqual(large, { width: 1024, height: 418 }); assert.equal(relayGets.get('large.jpg@0.125'), 1);
+  assert.deepEqual(large, { width: 1024, height: 418 }); assert.equal(relayGets.get('large.jpg@0.0625'), 1);
 
   const oriented = await page.evaluate(async () => { const { BrowserImageRenderer } = globalThis.__browserImageModule; const renderer = new BrowserImageRenderer(); const result = await renderer.render({ virtualPath: 'oriented.jpg' }); const bitmap = await createImageBitmap(await (await fetch(result.url)).blob()); const dimensions = [bitmap.width, bitmap.height]; bitmap.close(); renderer.dispose(); return dimensions; });
   assert.deepEqual(oriented, [384, 512]);
@@ -110,9 +116,22 @@ try {
   const cancelled = page.evaluate(async () => { const { BrowserImageRenderer } = globalThis.__browserImageModule; const renderer = new BrowserImageRenderer(); const controller = new AbortController(); const pending = renderer.render({ virtualPath: 'cancel.img', signal: controller.signal }); setTimeout(() => controller.abort(), 25); try { await pending; return ''; } catch (error) { return error.name; } finally { renderer.dispose(); } });
   assert.equal(await cancelled, 'AbortError');
 
+  const gated = await page.evaluate(async () => {
+    const { BrowserImageRenderer } = globalThis.__browserImageModule; const renderer = new BrowserImageRenderer();
+    const controllers = Array.from({ length: 5 }, () => new AbortController());
+    const requests = controllers.map((controller, index) => renderer.render({ virtualPath: `slow/${index}.img`, signal: controller.signal }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    controllers.slice(2).forEach((controller) => controller.abort());
+    const outcomes = await Promise.allSettled(requests); outcomes.forEach((outcome) => { if (outcome.status === 'fulfilled') renderer.release(outcome.value); }); renderer.dispose();
+    return outcomes.map((outcome) => outcome.status === 'fulfilled' ? 'ready' : outcome.reason.name);
+  });
+  assert.deepEqual(gated, ['ready', 'ready', 'AbortError', 'AbortError', 'AbortError']);
+  assert.equal([...relayGets].filter(([key]) => key.startsWith('slow/')).reduce((sum, [, count]) => sum + count, 0), 2, 'aborted queued renders fetched');
+  assert(maximumSlowGets <= 2, `ordinary display concurrency reached ${maximumSlowGets}`);
+
   const studio = await page.evaluate(async () => { const { loadStudioSource } = globalThis.__browserImageModule; const source = await loadStudioSource('large.jpg'); const bitmap = await createImageBitmap(source.blob); const dimensions = [bitmap.width, bitmap.height, source.sourceWidth, source.sourceHeight]; bitmap.close(); return dimensions; });
   assert.deepEqual(studio, [1750, 1250, 14000, 10000]); assert.equal(originalGets.get('large.jpg') ?? 0, 0);
-  console.log(`browserImages: Chromium ${await browser.version()} passed small relay WebP decode, original-coordinate crop, EXIF-normalized logical geometry, 14000x10000 bounded Studio scaling, no renderer LRU, cancellation, and zero raster /res requests (mock relay; not a live-backend benchmark)`);
+  console.log(`browserImages: Chromium ${await browser.version()} passed bounded concurrency/queued cancellation, small relay WebP decode, original-coordinate crop, EXIF-normalized logical geometry, 14000x10000 bounded Studio scaling, no renderer LRU, and zero raster /res requests (mock relay; not a live-backend benchmark)`);
 } finally {
   await page.close().catch(() => undefined); await browser.close().catch(() => undefined); vite.kill('SIGTERM');
   await new Promise((resolve) => { if (vite.exitCode !== null) resolve(); else { vite.once('exit', resolve); setTimeout(resolve, 2000); } });

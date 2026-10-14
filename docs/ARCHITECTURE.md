@@ -11,7 +11,7 @@ Two runtime directories are resolved by `app/backend/flightarchive/paths.py`:
 | Resource root | `RFG_RESOURCE_PATH` | `/resource` | must already exist; exposed read-only |
 | Data root | `RFG_DATA_DIR` | `/data` | created if absent; writable |
 
-`resolve_runtime_paths` also accepts explicit values (used by the CLI and tests). Both paths must be real directories; the data stores reject symlinked roots.
+`resolve_runtime_paths` also accepts explicit values (used by the CLI and tests). A configured resource- or data-root alias may be a directory symlink; resolution returns the canonical target directory used by the host and RFG. This configuration-boundary aliasing does not weaken store protection: direct store construction rejects a symlinked root, and the internal archive, activity, and legacy-task path components and leaf files must not be symlinks.
 
 ## Runtime ownership and request routing
 
@@ -93,6 +93,8 @@ HTTP surface (`routes/api.py`, all responses `Cache-Control: no-store`):
 
 `GET|HEAD /api/thumbnails/{virtual_path:path}?scale=<dyadic>` uses the same per-segment percent-decoding as `/res/` and accepts one optional decimal `scale` from `1, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625` (default `0.125`). Any other query parameter, a repeated `scale`, or an unsafe virtual path is `400`; there is no crop, flight lookup, or lifecycle concept.
 
+Cold derivative generation is limited to one Pillow job. A disconnected GET waiter is removed before full source fetch/render; cancellation of a Pillow thread already in progress waits for that thread's safe completion before releasing the generation slot.
+
 - `HEAD` reports runtime metadata without rendering or a full source `GET`: `X-Source-Width`/`Height` (EXIF-normalized), `X-Source-Bytes`, `X-Source-ETag`, `X-Thumbnail-Width`/`Height`/`Scale`, and a derivative `ETag`. Cold inspection fetches only a bounded source prefix through an RFG `Range` request (256 KiB). A cached entry's geometry is revalidated against that same bounded prefix, never by re-reading or re-rendering the source.
 - `GET` returns cached WebP bytes, or renders one on a cache miss. Rendering uses Pillow: JPEG decodes through the decoder's draft mode to bound cold work, while other formats may fully decode. A memory guard (Pillow decompression-bomb handling plus explicit dimension checks) and a one-job semaphore bound concurrency; these reduce risk but are not a hard memory guarantee.
 - Responses use `Cache-Control: no-cache` plus the derivative `ETag`, allowing browser storage while requiring revalidation after a stable virtual path is remapped. `GET` and `HEAD` accept `If-None-Match` (including weak validators, lists, and `*`): the service first reconfirms current source identity and geometry through its bounded `HEAD` path, returns bodyless `304` on a match without fetching or rendering the full source, and returns the new representation when source identity changed.
@@ -108,7 +110,7 @@ HTTP surface (`routes/api.py`, all responses `Cache-Control: no-store`):
 - `id`: `activity-<UTC YYYYMMDDTHHMMSSffffffZ>-<random hex>`
 - `createdAt`: microsecond-precision UTC ISO timestamp
 
-`POST /api/activity` accepts exactly `{source, kind, severity, state, code, details}`. The five string fields are opaque labels; `details` must be finite JSON of at most 64 KiB, and the request body is capped at 128 KiB and rejected with `413` before it is read. In practice the frontend posts only important failures (not routine successes). `GET /api/activity` returns `{days: [{date, activities}], nextCursor, hasMore, revision}`; it defaults to the newest three existing dates and accepts `before=YYYY-MM-DD&limitDays=1..30`. `revision` is the newest valid record id; oversized, non-finite, or damaged lines are skipped without rewriting the file.
+`POST /api/activity` accepts exactly `{source, kind, severity, state, code, details}`. The five string fields are opaque labels; `details` must be finite JSON of at most 64 KiB, and the request body is capped at 128 KiB and rejected with `413` before it is read. In practice the frontend posts only important failures (not routine successes). Its shared failure publisher owns the complete result: one centered Snackbar, one static drawer record, and at most one optional best-effort activity submission. Re-reporting the same error object is idempotent, and activity transport failure neither removes the local result nor creates another failure toast. There are no page-top result banners. `GET /api/activity` returns `{days: [{date, activities}], nextCursor, hasMore, revision}`; it defaults to the newest three existing dates and accepts `before=YYYY-MM-DD&limitDays=1..30`. `revision` is the newest valid record id; oversized, non-finite, or damaged lines are skipped without rewriting the file.
 
 The frontend heartbeat (`state/useWorkspaceHeartbeat.ts`) polls only `GET /api/status` every 30 seconds and exposes `checking | online | offline` plus the last status. `AppState` derives an unread badge from `activityRevision` versus the last revision the user acknowledged; opening the feedback drawer and loading activity advances that watermark. The drawer (`tasks/TasksPage.tsx`) shows three independent read-only streams: this session's feedback records, the persisted activity log, and the legacy fingerprint task history.
 
@@ -118,9 +120,10 @@ The frontend heartbeat (`state/useWorkspaceHeartbeat.ts`) polls only `GET /api/s
 
 ## Frontend structure
 
-- `main.tsx` composes `LanguageProvider` → `ResourceMappingProvider` → `App`; `AppStateProvider` adds feedback, business data, and heartbeat.
+- `main.tsx` composes `LanguageProvider` → one shared `FeedbackProvider` → `ResourceMappingProvider` → `App`; `AppStateProvider` reuses that feedback stream while adding business data and heartbeat. Isolated `AppStateProvider` mounts retain their own single feedback host for component tests and embedded surfaces.
 - `domain/` owns `BusinessData`, schema v1 parse/normalize, pure mutation commands, the fixed v2 document split/aggregate, selectors, and `BusinessDataProvider` (the per-document save queue).
-- `rfg/` owns the RFG HTTP client, pure mapping transforms, and `ResourceMappingProvider`.
+- `rfg/` owns the RFG HTTP client, pure mapping transforms, and `ResourceMappingProvider`. Provider refreshes register newly scanned catalog files as confirmed `inbox/` mappings and remove missing disposable inbox/ignore entries; same-frontend mapping write sections are FIFO so scans cannot overwrite explicit rename/release or final fingerprint writes. Coordinated writes resolve flat-name collisions against their latest mapping snapshot and return actual retargets to the domain coordinator.
+- The reference-library UI is the composition boundary for explicit resource-bearing CRUD: it compares before/prospective domain snapshots, asks `ResourceMappingProvider` to prepare mapping renames/releases first, then commits a prepared `BusinessDataProvider` mutation. Neither provider imports the other's types or persists ownership state. Mapping and named JSON writes cannot be atomic, so transient per-entry recovery receipts provide bounded best-effort compensation and visible failure reporting without replacing unrelated mapping changes.
 - `resources/` owns the picker/browser, the mappings page, and the bounded browser image renderer.
 - `flights/`, `reference/`, `scanstudio/`, `boardingpass/` are the feature UI.
 - `state/`, `feedback/`, `tasks/` own status/heartbeat, the session feedback stream, and the history drawer.

@@ -8,6 +8,7 @@ import { scaled, useDialogScale } from '../utils/dialogScale';
 import { isImageResource } from './resourcePaths';
 import { ResourceBrowser } from './ResourceBrowser';
 import { useResourceBrowser, type ResourceBrowserFilter } from './useResourceBrowser';
+import { ImageRequestScope } from './ImageRequestScope';
 
 export interface ResourcePickerDialogProps {
   open: boolean;
@@ -32,14 +33,14 @@ function OpenResourcePickerDialog({
   const filter = useMemo<ResourceBrowserFilter>(() => ({ entry, resource }) =>
     (selectable === 'inbox'
       ? resource.state === 'pending' && resource.present
-      : (resource.state === 'mapped' && resource.present) || (selected.includes(entry.virtual_path) && resource.state === 'missing'))
+      : (resource.present && (resource.state === 'mapped' || resource.state === 'pending')) || (selected.includes(entry.virtual_path) && resource.state === 'missing'))
     && (!imageOnly || isImageResource(entry.virtual_path))
     && (!allowedPaths || allowedPaths.includes(entry.virtual_path)), [allowedPaths, imageOnly, selectable, selected]);
   const browser = useResourceBrowser({ active: open, initialSelected: selected, multiple, filter });
 
   return <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth aria-labelledby="resource-picker-dialog-title" slotProps={{ paper: { sx: { width: scaled(900, dialogScale), maxWidth: '95vw', maxHeight: '90vh' } } }}>
     <DialogTitle id="resource-picker-dialog-title">{title}</DialogTitle>
-    <DialogContent dividers><ResourceBrowser browser={browser} label={title} multiple={multiple} /></DialogContent>
+    <DialogContent dividers><ImageRequestScope active={open}><ResourceBrowser browser={browser} label={title} multiple={multiple} /></ImageRequestScope></DialogContent>
     <DialogActions>
       {!multiple ? <Box sx={{ mr: 'auto' }} /> : null}
       <Button onClick={onClose}>{t('cancel')}</Button>

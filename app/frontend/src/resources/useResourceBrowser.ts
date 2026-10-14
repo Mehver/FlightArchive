@@ -62,6 +62,8 @@ export function useResourceBrowser({
     setQueryState('');
     setError(null);
     setPage(1);
+    // Browsing remains read-only with respect to form drafts and managed names;
+    // refresh independently registers newly scanned catalog files in inbox.
     void mapping.refresh()
       .then(() => {
         if (session.current !== current) return;
@@ -74,8 +76,8 @@ export function useResourceBrowser({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
-  const items = useMemo<ResourceBrowserItem[]>(() => toMappingRows(mapping.inventory).flatMap((row) =>
-    row.entry ? [{ entry: row.entry, resource: row.resource }] : []), [mapping.inventory]);
+  const items = useMemo<ResourceBrowserItem[]>(() => toMappingRows(mapping.inventory).map((row) =>
+    ({ entry: row.entry, resource: row.resource })), [mapping.inventory]);
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();

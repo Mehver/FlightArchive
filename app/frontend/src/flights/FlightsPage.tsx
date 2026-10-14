@@ -3,7 +3,7 @@
 
 /**
  * Flight display page: the product's centre. One shared filter/search bar
- * drives the same API results into two user-switchable views
+ * drives the same frontend domain records into two user-switchable views
  * (concise list and card grid); every record opens the full
  * flight-detail sheet. Browse-only: no create/edit/delete controls.
  */
@@ -30,6 +30,7 @@ import { FlightListView } from './FlightListView';
 import { FlightGridView } from './FlightGridView';
 import { useFlightViewMode, type FlightViewMode } from './flightViewPreference';
 import { useTranslation } from '../i18n';
+import { ImageRequestScope } from '../resources/ImageRequestScope';
 
 export function FlightsPage() {
   const { t } = useTranslation();
@@ -38,9 +39,12 @@ export function FlightsPage() {
   const [query, setQuery] = useState('');
   const [airline, setAirline] = useState('');
   const [viewMode, setViewMode] = useFlightViewMode();
+  const [visitedViews, setVisitedViews] = useState<ReadonlySet<FlightViewMode>>(() => new Set([viewMode]));
   const [detailId, setDetailId] = useState<string | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
   const flights = useMemo(() => data ? selectFlights(data, { query, airline }) : null, [data, query, airline]);
   const detail = data?.flights.find((flight) => flight.id === detailId) ?? null;
+  const detailActuallyOpen = detailOpen && detail !== null;
 
   const airlineNames = useMemo(() => new Map((catalogs?.airlines ?? []).map((item) => [item.code, displayName(item.nameZh, item.nameEn, t('notAvailable'))])), [catalogs, t]);
   const airlines = useMemo(() => new Map((catalogs?.airlines ?? []).map((item) => [item.code, item])), [catalogs]);
@@ -51,7 +55,10 @@ export function FlightsPage() {
     airlineNames,
     airlines,
     airports,
-    onOpen: (flight: { id: string }) => setDetailId(flight.id),
+    onOpen: (flight: { id: string }) => {
+      setDetailId(flight.id);
+      setDetailOpen(true);
+    },
   };
 
   const viewToggle = (
@@ -60,7 +67,10 @@ export function FlightsPage() {
       exclusive
       value={viewMode}
       onChange={(_event, next: FlightViewMode | null) => {
-        if (next) setViewMode(next);
+        if (next) {
+          setVisitedViews((visited) => visited.has(next) ? visited : new Set([...visited, next]));
+          setViewMode(next);
+        }
       }}
       aria-label={t('switchDisplayView')}
     >
@@ -115,24 +125,33 @@ export function FlightsPage() {
         <ErrorState message={loadError?.message ?? t('failedToLoadFlights')} onRetry={() => void reload()} />
       ) : flights === null ? (
         <LoadingState label={t('loadingFlights')} />
-      ) : flights.length === 0 ? (
-        <EmptyState
-          title={t('noFlights')}
-          hint={t('noFlightsHint')}
-        />
-      ) : viewMode === 'grid' ? (
-        <FlightGridView {...viewProps} />
       ) : (
-        <FlightListView {...viewProps} />
+        <>
+          {flights.length === 0 ? (
+            <EmptyState title={t('noFlights')} hint={t('noFlightsHint')} />
+          ) : null}
+          {visitedViews.has('list') ? (
+            <Box hidden={viewMode !== 'list' || flights.length === 0} aria-hidden={viewMode !== 'list' || flights.length === 0} sx={{ display: viewMode === 'list' && flights.length > 0 ? 'block' : 'none' }}>
+              <ImageRequestScope active={viewMode === 'list' && !detailActuallyOpen}><FlightListView {...viewProps} /></ImageRequestScope>
+            </Box>
+          ) : null}
+          {visitedViews.has('grid') ? (
+            <Box hidden={viewMode !== 'grid' || flights.length === 0} aria-hidden={viewMode !== 'grid' || flights.length === 0} sx={{ display: viewMode === 'grid' && flights.length > 0 ? 'block' : 'none' }}>
+              <ImageRequestScope active={viewMode === 'grid' && !detailActuallyOpen}><FlightGridView {...viewProps} /></ImageRequestScope>
+            </Box>
+          ) : null}
+        </>
       )}
 
-      <FlightDetailDialog
-        flight={detail}
-        catalogs={catalogs}
-        airlineNames={airlineNames}
-        open={detailId !== null && detail !== null}
-        onClose={() => setDetailId(null)}
-      />
+      <ImageRequestScope active={detailActuallyOpen}>
+        <FlightDetailDialog
+          flight={detail}
+          catalogs={catalogs}
+          airlineNames={airlineNames}
+          open={detailActuallyOpen}
+          onClose={() => setDetailOpen(false)}
+        />
+      </ImageRequestScope>
     </Box>
   );
 }

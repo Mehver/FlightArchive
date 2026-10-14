@@ -47,13 +47,13 @@ describe('AirlineLogo', () => {
     expect(getComputedStyle(image).height).toBe('40px');
     expect(getComputedStyle(image).objectFit).toBe('contain');
     const host = image.closest('[role="img"]') as HTMLElement;
-    const loading = screen.getByTestId('airline-logo-loading');
+    const loading = screen.getByTestId('image-loading-indicator-host');
     expect(getComputedStyle(host).position).toBe('relative');
     expect(getComputedStyle(loading).position).toBe('absolute');
     expect(getComputedStyle(loading).inset).toBe('0px');
   });
 
-  it.each(['objects/banner.png', 'objects/banner.webp'])('gates the offscreen horizontal raster %s and keeps it after exit', async (path) => {
+  it.each(['objects/banner.png', 'objects/banner.webp'])('marks the horizontal raster %s inactive after viewport exit', async (path) => {
     const callbacks: IntersectionObserverCallback[] = [];
     const observed: Element[] = [];
     class Observer {
@@ -63,7 +63,7 @@ describe('AirlineLogo', () => {
       unobserve() {}
       takeRecords() { return []; }
       root = null;
-      rootMargin = '250px 0px';
+      rootMargin = '0px';
       thresholds = [0];
     }
     vi.stubGlobal('IntersectionObserver', Observer);
@@ -84,8 +84,10 @@ describe('AirlineLogo', () => {
     mocks.rasterDisabled.mockClear();
     await act(async () => callbacks[0]([{ isIntersecting: false } as IntersectionObserverEntry], {} as IntersectionObserver));
     expect(mocks.rasterWork).not.toHaveBeenCalled();
-    expect(mocks.rasterDisabled).not.toHaveBeenCalled();
-    expect(container.querySelector('img')).not.toBeNull();
+    expect(mocks.rasterDisabled).toHaveBeenCalledWith(path);
+    // This component-level hook mock reports loading while disabled; URL
+    // retention itself is covered by useBrowserImage's lifecycle tests.
+    expect(container.querySelector('img')).toBeNull();
   });
 
   it('keeps a stable observed horizontal-logo host when its source appears later', async () => {
@@ -98,7 +100,7 @@ describe('AirlineLogo', () => {
       unobserve() {}
       takeRecords() { return []; }
       root = null;
-      rootMargin = '250px 0px';
+      rootMargin = '0px';
       thresholds = [0];
     }
     vi.stubGlobal('IntersectionObserver', Observer);

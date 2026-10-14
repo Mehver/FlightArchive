@@ -27,10 +27,10 @@ export type FingerprintRowState = { kind: 'hidden' } | { kind: 'stable'; calcula
 
 /**
  * Stable rows display hashes; only rows whose local source is present can be
- * calculated. Temporary and local-only rows hide fingerprint controls.
+ * calculated. Temporary rows hide fingerprint controls.
  */
 export function fingerprintRowState(row: MappingRow): FingerprintRowState {
-  if (row.kind === 'inbox' || row.kind === 'ignored' || row.kind === 'local_only' || !row.virtualPath || !row.entry) {
+  if (row.kind === 'inbox' || row.kind === 'ignored') {
     return { kind: 'hidden' };
   }
   return { kind: 'stable', calculable: row.resource.present };
@@ -49,7 +49,7 @@ export interface FingerprintTarget {
 export function fingerprintTargets(rows: readonly MappingRow[]): FingerprintTarget[] {
   return rows.flatMap((row) => {
     const state = fingerprintRowState(row);
-    if (state.kind !== 'stable' || !state.calculable || !row.virtualPath || !row.localPath || !row.entry) {
+    if (state.kind !== 'stable' || !state.calculable) {
       return [];
     }
     return [
@@ -57,7 +57,7 @@ export function fingerprintTargets(rows: readonly MappingRow[]): FingerprintTarg
         virtualPath: row.virtualPath,
         localPath: row.localPath,
         entry: row.entry,
-        stored: HASH_ALGORITHMS.filter((algorithm) => Boolean(row.entry?.[algorithm])),
+        stored: HASH_ALGORITHMS.filter((algorithm) => Boolean(row.entry[algorithm])),
         supported: supportedFingerprintAlgorithms(row.localPath),
       },
     ];

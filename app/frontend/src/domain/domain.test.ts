@@ -12,6 +12,7 @@ import {
 } from './commands';
 import { normalizeAircraftType, normalizeAirline, normalizeAirport, parseBusinessDataV1 } from './schemaV1';
 import { selectFlights } from './selectors';
+import type { FlightRecord } from './types';
 
 const dependencies = {
   now: () => '2026-08-09T10:11:12+00:00',
@@ -60,6 +61,21 @@ describe('BusinessData v1 golden fixture', () => {
     expect(data.flights).toHaveLength(1);
   });
 
+  it('retries bounded generated-id collisions until a unique id is found', () => {
+    const data = parseBusinessDataV1(fixture.validDocument);
+    const ids = ['flight-1', 'flight-1', 'unique-id'];
+    const result = createFlight(data, fixture.normalization.flightInput, { ...dependencies, newId: () => ids.shift()! });
+    expect(result.flights.at(-1)?.id).toBe('unique-id');
+  });
+
+  it('fails without adding a record when all bounded id attempts collide', () => {
+    const data = parseBusinessDataV1(fixture.validDocument);
+    let attempts = 0;
+    expect(() => createFlight(data, fixture.normalization.flightInput, { ...dependencies, newId: () => { attempts++; return 'flight-1'; } })).toThrow(DomainConflictError);
+    expect(attempts).toBe(8);
+    expect(data.flights).toHaveLength(1);
+  });
+
   it.each(fixture.invalidFlightInputs)('rejects invalid flight input $name', ({ value }) => {
     const data = parseBusinessDataV1(fixture.validDocument);
     expect(() => createFlight(data, value, dependencies)).toThrow();
@@ -73,6 +89,13 @@ describe('BusinessData v1 golden fixture', () => {
 
     const unchanged = updateFlight(data, mutation.flightId, { notes: 'updated' }, dependencies);
     expect(unchanged.flights[0].paperBoardingPassLayouts?.paperBoardingPassFront).toBeDefined();
+  });
+
+  it('clears electronic extraction for a genuine source replacement', () => {
+    const data = parseBusinessDataV1(fixture.validDocument);
+    const existing: FlightRecord = { ...data.flights[0], electronicBoardingPassResourcePath: 'objects/electronic-old.png', electronicBoardingPass: fixture.validElectronicExtraction as FlightRecord['electronicBoardingPass'] };
+    const changed = updateFlight({ ...data, flights: [existing] }, existing.id, { electronicBoardingPassResourcePath: 'objects/electronic-new.png' }, dependencies);
+    expect(changed.flights[0].electronicBoardingPass).toBeNull();
   });
 
   it('replaces an explicitly supplied layout dictionary so studio clear works', () => {

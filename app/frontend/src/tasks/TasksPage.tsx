@@ -32,8 +32,12 @@ const ACTIVITY_CODE_KEYS: Partial<Record<string, TranslationKey>> = {
   'v1-to-v2-committed': 'activityMigrationCommitted',
   'v1-to-v2-failed-fallback-seeded': 'activityMigrationFallbackSeeded',
   'archive-document-save-failed': 'activityArchiveSaveFailed',
+  'archive-prepared-commit-failed': 'activityArchiveSaveFailed',
+  'archive-prepared-rollback-failed': 'activityArchiveRestoreFailed',
   'resource-mapping-failed': 'activityMappingFailed',
   'resource-fingerprint-failed': 'activityFingerprintFailed',
+  'resource-coordination-failed': 'activityResourceCoordinationFailed',
+  'resource-coordination-compensation-failed': 'resourceCompensationFailed',
 };
 
 function formatTimestamp(iso: string): string {

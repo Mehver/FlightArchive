@@ -16,7 +16,6 @@ import {
   TextField,
   Tooltip,
   Typography,
-  Dialog, DialogActions, DialogContent, DialogTitle,
 } from '@mui/material';
 import FindReplaceIcon from '@mui/icons-material/FindReplace';
 import FingerprintIcon from '@mui/icons-material/Fingerprint';
@@ -26,7 +25,6 @@ import { PageHeader } from '../components/PageHeader';
 import { EmptyState, ErrorState, LoadingState } from '../components/States';
 import { useTranslation, type TranslationKey } from '../i18n';
 import { useAppState } from '../state/AppState';
-import { api } from '../api/client';
 import { formatBytes } from '../utils/format';
 import {
   toMappingRows,
@@ -48,6 +46,7 @@ import { AutoRematchDialog, type AutoMatchAlgorithm } from './AutoRematchDialog'
 import { ResourcePickerDialog } from './ResourcePickerDialog';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { MarqueeCopyText } from './MarqueeCopyText';
+import { useBusinessData } from '../domain/BusinessDataProvider';
 import {
   formatMappingPath,
   MappingHeaderCell,
@@ -62,19 +61,7 @@ const KIND_LABEL: Record<MappingRowKind, TranslationKey> = {
   inbox: 'mappingStatusInbox',
   ignored: 'mappingStatusIgnored',
   missing: 'mappingStatusMissing',
-  local_only: 'mappingStatusLocalOnly',
 };
-
-function reportResourceFailure(kind: 'mapping' | 'fingerprint', error: unknown, details: Record<string, string> = {}): void {
-  void api.reportActivity({
-    source: 'frontend-resources',
-    kind,
-    severity: 'error',
-    state: 'failed',
-    code: kind === 'mapping' ? 'resource-mapping-failed' : 'resource-fingerprint-failed',
-    details: { ...details, message: error instanceof Error ? error.message : String(error) },
-  }).catch(() => undefined);
-}
 
 type AutoRematchScope = {
   initialCandidatePaths: string[];
@@ -92,11 +79,13 @@ export function sizeOf(row: MappingRow): number | null {
 
 export function ResourceMappingsPage() {
   const { t } = useTranslation();
-  const { notify, showError } = useAppState();
+  const { notify, reportFailure } = useAppState();
   const resources = useResourceMapping();
+  const business = useBusinessData();
   const [filter, setFilter] = useState<MappingRowFilter | 'rebuild'>('all');
   const [search, setSearch] = useState('');
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
+  const selectionAnchorRef = useRef<string | null>(null);
   const [firstSort, setFirstSort] = useState<{ field: FirstSortField; direction: SortDirection } | null>(null);
   const [secondSort, setSecondSort] = useState<{ field: SecondSortField; direction: SortDirection }>({ field: 'virtualPath', direction: 'asc' });
   const [pathDisplay, setPathDisplay] = useState<Record<'virtualPath' | 'localPath', MappingPathDisplayMode>>({ virtualPath: 0, localPath: 0 });
@@ -108,33 +97,26 @@ export function ResourceMappingsPage() {
   const [fingerprintOpen, setFingerprintOpen] = useState(false);
   const [fingerprintPaths, setFingerprintPaths] = useState<string[]>([]);
   const [fingerprintBusy, setFingerprintBusy] = useState(false);
-  const [fingerprintError, setFingerprintError] = useState<string | null>(null);
   const [releasePaths, setReleasePaths] = useState<string[] | null>(null);
   const [releaseBusy, setReleaseBusy] = useState(false);
   const releaseInFlight = useRef(false);
   const [unignoreBusy, setUnignoreBusy] = useState(false);
   const [ignoreBusy, setIgnoreBusy] = useState(false);
-  const [materializeRow, setMaterializeRow] = useState<MappingRow | null>(null);
-  const [materializeTarget, setMaterializeTarget] = useState('');
   const tRef = useRef(t);
-  const showErrorRef = useRef(showError);
+  const reportFailureRef = useRef(reportFailure);
   tRef.current = t;
-  showErrorRef.current = showError;
+  reportFailureRef.current = reportFailure;
 
-  const load = useCallback(async (background = false, reconcile = false) => {
+  const load = useCallback(async () => {
       try {
-        await (reconcile ? resources.reconcile() : resources.refresh());
+        await resources.refresh();
       } catch (error) {
-        if (background) {
-          showErrorRef.current(error, tRef.current('mappingLoadFailed'), { action: tRef.current('mappingRefresh'), form: tRef.current('resourceMappings') });
-        }
-        reportResourceFailure('mapping', error, { operation: reconcile ? 'reconcile' : 'refresh' });
+         reportFailureRef.current(error, {
+           fallback: tRef.current('mappingLoadFailed'), context: { action: tRef.current('mappingRefresh'), form: tRef.current('resourceMappings') },
+           activity: { source: 'frontend-resources', kind: 'mapping', severity: 'error', state: 'failed', code: 'resource-mapping-failed', details: { operation: 'refresh' } },
+         });
       }
-    }, [resources.refresh, resources.reconcile]);
-
-  useEffect(() => {
-    void load(false, false);
-  }, [load]);
+    }, [resources.refresh]);
 
   const rows = useMemo(
     () => toMappingRows(resources.inventory),
@@ -153,7 +135,7 @@ export function ResourceMappingsPage() {
       return !needle || text.includes(needle);
     };
     const filtered = rows.filter((row) => (filter === 'rebuild' ? row.kind === 'missing' || row.kind === 'inbox' : filter === 'all' || row.kind === filter) && matches(row));
-    const firstValue = (row: MappingRow) => Number(row.entry && HASH_ALGORITHMS.some((algorithm) => row.entry?.[algorithm]));
+    const firstValue = (row: MappingRow) => Number(HASH_ALGORITHMS.some((algorithm) => row.entry[algorithm]));
     const compareSecond = (left: MappingRow, right: MappingRow) => {
       const direction = secondSort.direction === 'asc' ? 1 : -1;
       if (secondSort.field === 'size') {
@@ -162,8 +144,8 @@ export function ResourceMappingsPage() {
         if (rightSize === null) return -1;
         return direction * (leftSize - rightSize);
       }
-      const leftPath = secondSort.field === 'virtualPath' ? left.virtualPath ?? '' : left.localPath;
-      const rightPath = secondSort.field === 'virtualPath' ? right.virtualPath ?? '' : right.localPath;
+      const leftPath = secondSort.field === 'virtualPath' ? left.virtualPath : left.localPath;
+      const rightPath = secondSort.field === 'virtualPath' ? right.virtualPath : right.localPath;
       return direction * leftPath.localeCompare(rightPath);
     };
     return [...filtered].sort((left, right) => {
@@ -180,21 +162,26 @@ export function ResourceMappingsPage() {
       ? row.kind === 'missing' || row.kind === 'inbox'
       : filter !== 'all' && row.kind === filter;
     if (!inCurrentFilter) return [];
-    if (!row.virtualPath || filter === 'all' || filter === 'local_only') return [];
+    if (filter === 'all') return [];
     const allowed = filter === 'rebuild'
       ? row.kind === 'missing' || (row.kind === 'inbox' && row.resource.present)
       : filter === 'missing' ? row.kind === 'missing'
        : filter === 'inbox' ? row.resource.present
-      : filter === 'ignored' ? row.resource.present
+       : filter === 'ignored' ? true
       : filter === 'paired' ? row.resource.present
       : false;
     return allowed ? [row.virtualPath] : [];
   })), [rows, filter]);
+  const visibleSelectablePaths = useMemo(
+    () => visible.filter((row) => selectablePaths.has(row.virtualPath)).map((row) => row.virtualPath),
+    [selectablePaths, visible],
+  );
   useEffect(() => {
     // A refresh temporarily invalidates the view; only prune against complete data.
     if (resources.mapping === null) return;
     setSelectedPaths((selected) => selected.filter((path) => selectablePaths.has(path)));
   }, [selectablePaths, resources.mapping]);
+  useEffect(() => { selectionAnchorRef.current = null; }, [filter, search, firstSort, secondSort]);
 
   const eligibleFingerprints = useMemo(() => fingerprintTargets(rows), [rows]);
   // Dialog targets resolve from the *latest* eligible set: after a reload the
@@ -213,8 +200,7 @@ export function ResourceMappingsPage() {
       setAutoRematchScope(null);
     } catch (error) {
       const context = { action: t('batchRematchAction'), form: t('resourceMappings') };
-      showError(error, t('batchRematchFailed'), context);
-      reportResourceFailure('mapping', error, { operation: 'auto-rematch' });
+       reportFailure(error, { fallback: t('batchRematchFailed'), context, activity: { source: 'frontend-resources', kind: 'mapping', severity: 'error', state: 'failed', code: 'resource-mapping-failed', details: { operation: 'auto-rematch' } } });
     } finally { setAutoRematchBusy(false); }
   };
 
@@ -229,8 +215,7 @@ export function ResourceMappingsPage() {
       notify(t('manualRematchDone'), 'success', context);
       setManualTargetPath(null);
     } catch (error) {
-      showError(error, t('manualRematchFailed'), context);
-      reportResourceFailure('mapping', error, { operation: 'manual-rematch', resource: targetVirtualPath });
+       reportFailure(error, { fallback: t('manualRematchFailed'), context, activity: { source: 'frontend-resources', kind: 'mapping', severity: 'error', state: 'failed', code: 'resource-mapping-failed', details: { operation: 'manual-rematch', resource: targetVirtualPath } } });
     } finally {
       manualRematchInFlight.current = false;
       setManualRematchBusy(false);
@@ -245,14 +230,12 @@ export function ResourceMappingsPage() {
       setSelectedPaths([]);
     } catch (error) {
       const context = { action: t('resourceIgnore'), resource: paths.join(', '), form: t('resourceMappings') };
-      showError(error, t('resourceIgnoreFailed'), context);
-      reportResourceFailure('mapping', error, { operation: 'ignore', resources: paths.join(', ') });
+       reportFailure(error, { fallback: t('resourceIgnoreFailed'), context, activity: { source: 'frontend-resources', kind: 'mapping', severity: 'error', state: 'failed', code: 'resource-mapping-failed', details: { operation: 'ignore', resources: paths.join(', ') } } });
     } finally { setIgnoreBusy(false); }
   };
 
   const openFingerprints = (virtualPaths: string[]) => {
     setFingerprintPaths(virtualPaths);
-    setFingerprintError(null);
     setFingerprintOpen(true);
   };
 
@@ -261,14 +244,19 @@ export function ResourceMappingsPage() {
     releaseInFlight.current = true;
     setReleaseBusy(true);
     try {
-      await resources.release(releasePaths);
+      await resources.release(releasePaths, () => {
+        if (business.phase !== 'ready' || !business.data) throw new Error(t('mappingReleaseReferencesUnavailable'));
+        if (business.hasResourceReferences(releasePaths)) throw new Error(t('mappingReleaseReferenced'));
+      });
       notify(t('mappingReleaseDone', { count: releasePaths.length }), 'success', { action: t('mappingReleaseAction'), form: t('resourceMappings') });
       setReleasePaths(null);
     } catch (error) {
       const context = { action: t('mappingReleaseAction'), form: t('resourceMappings') };
       setReleasePaths(null);
-      showError(error, t('mappingReleaseFailed'), context);
-      reportResourceFailure('mapping', error, { operation: 'release', resources: releasePaths.join(', ') });
+      const fallback = error instanceof Error && (error.message === t('mappingReleaseReferenced') || error.message === t('mappingReleaseReferencesUnavailable'))
+        ? error.message
+        : t('mappingReleaseFailed');
+       reportFailure(error, { fallback, context, activity: { source: 'frontend-resources', kind: 'mapping', severity: 'error', state: 'failed', code: 'resource-mapping-failed', details: { operation: 'release', resources: releasePaths.join(', ') } } });
     } finally {
       releaseInFlight.current = false;
       setReleaseBusy(false);
@@ -280,18 +268,39 @@ export function ResourceMappingsPage() {
     setUnignoreBusy(true);
     try {
       await resources.unignore(paths);
-      notify(t('mappingUnignoreDone', { count: paths.length }), 'success', { action: t('mappingUnignoreAction', { count: paths.length }), form: t('resourceMappings') });
+      notify(t('mappingUnignoreDone', { count: paths.length }), 'success', { action: paths.length === 1 ? t('mappingUnignoreOneAction') : t('mappingUnignoreAction', { count: paths.length }), form: t('resourceMappings') });
       setSelectedPaths([]);
     } catch (error) {
-      const context = { action: t('mappingUnignoreAction', { count: paths.length }), form: t('resourceMappings') };
-      showError(error, t('mappingUnignoreFailed'), context);
-      reportResourceFailure('mapping', error, { operation: 'unignore', resources: paths.join(', ') });
+      const context = { action: paths.length === 1 ? t('mappingUnignoreOneAction') : t('mappingUnignoreAction', { count: paths.length }), form: t('resourceMappings') };
+       reportFailure(error, { fallback: t('mappingUnignoreFailed'), context, activity: { source: 'frontend-resources', kind: 'mapping', severity: 'error', state: 'failed', code: 'resource-mapping-failed', details: { operation: 'unignore', resources: paths.join(', ') } } });
     } finally {
       setUnignoreBusy(false);
     }
   };
 
-  const toggleSelected = (path: string) => setSelectedPaths((selected) => selected.includes(path) ? selected.filter((item) => item !== path) : [...selected, path]);
+  const toggleSelected = (path: string, shiftKey = false) => setSelectedPaths((selected) => {
+    const anchor = selectionAnchorRef.current;
+    const anchorIndex = anchor === null ? -1 : visibleSelectablePaths.indexOf(anchor);
+    const targetIndex = visibleSelectablePaths.indexOf(path);
+    if (shiftKey && anchorIndex >= 0 && targetIndex >= 0) {
+      const start = Math.min(anchorIndex, targetIndex);
+      const end = Math.max(anchorIndex, targetIndex);
+      const next = [...selected];
+      for (const visiblePath of visibleSelectablePaths.slice(start, end + 1)) {
+        if (!next.includes(visiblePath)) next.push(visiblePath);
+      }
+      return next;
+    }
+    selectionAnchorRef.current = path;
+    return selected.includes(path) ? selected.filter((item) => item !== path) : [...selected, path];
+  });
+
+  const toggleAllSelected = () => {
+    selectionAnchorRef.current = null;
+    setSelectedPaths((old) => [...selectablePaths].every((path) => old.includes(path))
+      ? old.filter((path) => !selectablePaths.has(path))
+      : [...new Set([...old, ...selectablePaths])]);
+  };
 
   const openSelectedAutoRematch = () => setAutoRematchScope({
     initialCandidatePaths: filter === 'rebuild'
@@ -303,7 +312,6 @@ export function ResourceMappingsPage() {
 
   const runFingerprints = async (virtualPaths: string[], algorithms: HashAlgorithm[], forceOverwrite: boolean) => {
     setFingerprintBusy(true);
-    setFingerprintError(null);
     try {
       const targetsByPath = new Map(eligibleFingerprints.map((target) => [target.virtualPath, target]));
       const groups = new Map<string, string[]>();
@@ -320,12 +328,11 @@ export function ResourceMappingsPage() {
         if (result.status === 'cancelled') return;
         if (result.status === 'failed') throw new Error(`${result.failed} fingerprint calculation(s) failed`);
       }
+      notify(t('fingerprintsCalculated'), 'success', { action: t('fingerprintCalculate'), resource: virtualPaths.join(', '), form: t('resourceMappings') });
       setFingerprintOpen(false);
     } catch (error) {
       const context = { action: t('fingerprintCalculate'), resource: virtualPaths.join(', '), form: t('resourceMappings') };
-      setFingerprintError(t('fingerprintsFailed'));
-      showError(error, t('fingerprintsFailed'), context);
-      reportResourceFailure('fingerprint', error, { resources: virtualPaths.join(', ') });
+       reportFailure(error, { fallback: t('fingerprintsFailed'), context, activity: { source: 'frontend-resources', kind: 'fingerprint', severity: 'error', state: 'failed', code: 'resource-fingerprint-failed', details: { resources: virtualPaths.join(', ') } } });
     } finally {
       setFingerprintBusy(false);
     }
@@ -338,9 +345,6 @@ export function ResourceMappingsPage() {
     { value: 'inbox', label: t('mappingStatusInbox'), count: counts.inbox },
     { value: 'ignored', label: t('mappingStatusIgnored'), count: counts.ignored },
     { value: 'paired', label: t('mappingStatusMapped'), count: counts.paired },
-    ...(counts.local_only > 0
-      ? [{ value: 'local_only' as MappingRowFilter, label: t('mappingStatusLocalOnly'), count: counts.local_only }]
-      : []),
   ];
   const rowSelectionLabel: TranslationKey = filter === 'inbox'
     ? 'mappingIgnoreSelect'
@@ -388,12 +392,9 @@ export function ResourceMappingsPage() {
             {counts.ignored > 0 ? <MappingStatusChip kind="ignored" label={t('mappingSummaryIgnored', { count: counts.ignored })} /> : null}
             <MappingStatusChip kind="inbox" label={t('mappingSummaryInbox', { count: counts.inbox })} />
             <MappingStatusChip kind="paired" label={t('mappingSummaryMapped', { count: counts.paired })} />
-            {counts.local_only > 0 ? (
-              <MappingStatusChip kind="local_only" label={t('mappingSummaryLocalOnly', { count: counts.local_only })} />
-            ) : null}
           </Stack>
           <Stack direction="row" sx={{ mb: 2, gap: 1, alignItems: 'center' }}>
-            <Button size="small" onClick={() => void load(true, true)} disabled={resources.loading}>{t('mappingRefresh')}</Button>
+            <Button size="small" onClick={() => void load()} disabled={resources.loading}>{t('mappingRefresh')}</Button>
             {resources.fingerprintProgress.status !== 'idle' ? (
               <Typography variant="caption" color="text.secondary">
                 {`${resources.fingerprintProgress.completed}/${resources.fingerprintProgress.total} · ${resources.fingerprintProgress.status}`}
@@ -443,7 +444,7 @@ export function ResourceMappingsPage() {
           ) : (
             <MappingTable label={t('resourceMappings')} header={
               <TableRow>
-                {filter !== 'all' && filter !== 'local_only' ? <MappingHeaderCell padding="checkbox"><Checkbox size="small" checked={selectablePaths.size > 0 && [...selectablePaths].every((path) => selectedPaths.includes(path))} indeterminate={selectedPaths.some((path) => selectablePaths.has(path)) && ![...selectablePaths].every((path) => selectedPaths.includes(path))} disabled={selectablePaths.size === 0} onChange={() => setSelectedPaths((old) => [...selectablePaths].every((path) => old.includes(path)) ? old.filter((path) => !selectablePaths.has(path)) : [...new Set([...old, ...selectablePaths])])} slotProps={{ input: { 'aria-label': t('batchRematchSelectVisible') } }} /></MappingHeaderCell> : null}
+                 {filter !== 'all' ? <MappingHeaderCell padding="checkbox"><Checkbox size="small" checked={selectablePaths.size > 0 && [...selectablePaths].every((path) => selectedPaths.includes(path))} indeterminate={selectedPaths.some((path) => selectablePaths.has(path)) && ![...selectablePaths].every((path) => selectedPaths.includes(path))} disabled={selectablePaths.size === 0} onChange={toggleAllSelected} slotProps={{ input: { 'aria-label': t('batchRematchSelectVisible') } }} /></MappingHeaderCell> : null}
                  <MappingHeaderCell>{t('status')}</MappingHeaderCell>
                 <MappingHeaderCell sortDimension="second" active={secondSort.field === 'virtualPath'} direction={secondSort.field === 'virtualPath' ? secondSort.direction : 'asc'} onLabelClick={() => selectSecondSort('virtualPath')} onDirectionClick={() => selectSecondSort('virtualPath')} directionAriaLabel={sortDirectionLabel(t('mappingVirtualPath'), secondSort.field === 'virtualPath' ? secondSort.direction : 'asc')} pathDisplay={{ mode: pathDisplay.virtualPath, onCycle: () => cyclePathDisplay('virtualPath'), ariaLabel: t('mappingPathDisplayMode', { column: t('mappingVirtualPath'), mode: pathDisplay.virtualPath + 1 }) }}>{t('mappingVirtualPath')}</MappingHeaderCell>
                 <MappingHeaderCell sortDimension="second" active={secondSort.field === 'localPath'} direction={secondSort.field === 'localPath' ? secondSort.direction : 'asc'} onLabelClick={() => selectSecondSort('localPath')} onDirectionClick={() => selectSecondSort('localPath')} directionAriaLabel={sortDirectionLabel(t('mappingLocalPath'), secondSort.field === 'localPath' ? secondSort.direction : 'asc')} pathDisplay={{ mode: pathDisplay.localPath, onCycle: () => cyclePathDisplay('localPath'), ariaLabel: t('mappingPathDisplayMode', { column: t('mappingLocalPath'), mode: pathDisplay.localPath + 1 }) }}>{t('mappingLocalPath')}</MappingHeaderCell>
@@ -457,27 +458,21 @@ export function ResourceMappingsPage() {
                     const fingerprint = fingerprintRowState(row);
                      return (
                       <TableRow key={row.key} hover>
-                          {filter !== 'all' && filter !== 'local_only' ? <TableCell padding="checkbox">
-                             {row.virtualPath && selectablePaths.has(row.virtualPath) ? (
+                          {filter !== 'all' ? <TableCell padding="checkbox">
+                             {selectablePaths.has(row.virtualPath) ? (
                                <Checkbox
                                  size="small"
-                                   slotProps={{ input: { 'aria-label': t(rowSelectionLabel, { path: row.virtualPath }) } }} checked={selectedPaths.includes(row.virtualPath)} onChange={() => toggleSelected(row.virtualPath!)} disabled={ignoreBusy || unignoreBusy || autoRematchBusy || fingerprintBusy}
+                                    slotProps={{ input: { 'aria-label': t(rowSelectionLabel, { path: row.virtualPath }) } }} checked={selectedPaths.includes(row.virtualPath)} onChange={(event) => toggleSelected(row.virtualPath, Boolean((event.nativeEvent as MouseEvent).shiftKey))} disabled={ignoreBusy || unignoreBusy || autoRematchBusy || fingerprintBusy}
                                />
                              ) : null}
                           </TableCell> : null}
                            <TableCell sx={{ whiteSpace: 'nowrap' }}><MappingStatusChip kind={row.kind} label={<SearchHighlight text={t(KIND_LABEL[row.kind])} query={search} />} /></TableCell>
                          <TableCell sx={{ maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                           {row.virtualPath ? (
-                             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0 }}>
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0 }}>
                                <Box sx={{ minWidth: 0, flex: '1 1 auto', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 'caption.fontSize' }}>
                                  <MarqueeCopyText value={row.virtualPath} displayText={formatMappingPath(row.virtualPath, pathDisplay.virtualPath)} query={search} copiedLabel={t('mappingCopied')} ariaLabel={t('mappingCopyField', { field: t('mappingVirtualPath'), value: row.virtualPath })} />
                                </Box>
-                             </Box>
-                          ) : (
-                            <Typography variant="caption" color="text.disabled">
-                              {t('notAvailable')}
-                            </Typography>
-                          )}
+                            </Box>
                         </TableCell>
                          <TableCell sx={{ maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                            {row.kind === 'missing' ? (
@@ -501,7 +496,7 @@ export function ResourceMappingsPage() {
                             </Typography>
                            ) : (
                             <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 0.5 }}>
-                                {row.entry ? <HashPresenceChips entry={row.entry} localPath={row.localPath} highlightQuery={search} /> : null}
+                                 <HashPresenceChips entry={row.entry} localPath={row.localPath} highlightQuery={search} />
                             </Box>
                           )}
                         </TableCell>
@@ -517,30 +512,29 @@ export function ResourceMappingsPage() {
                                  color="primary"
                                  variant="outlined"
                                  startIcon={<FingerprintIcon />}
-                                onClick={() => row.virtualPath && openFingerprints([row.virtualPath])}
+                                 onClick={() => openFingerprints([row.virtualPath])}
                                 disabled={fingerprintBusy}
                               >
                                 {t('fingerprintAction')}
                               </Button>
                             </Tooltip>
                           ) : null}
-                            {(row.kind === 'missing' || row.kind === 'paired') && row.entry ? (
+                             {row.kind === 'missing' || row.kind === 'paired' ? (
                               <Button
                                 size="small"
                                 color="primary"
                                 variant="outlined"
                                 startIcon={<FindReplaceIcon />}
-                                onClick={() => setManualTargetPath(row.entry!.virtual_path)}
+                                 onClick={() => setManualTargetPath(row.entry.virtual_path)}
                                 disabled={manualRematchBusy}
                              >
                                {t('manualRematchAction')}
                              </Button>
                             ) : null}
-                            {row.kind === 'inbox' && row.resource.present && row.virtualPath ? <Button size="small" variant="outlined" onClick={() => { setMaterializeRow(row); setMaterializeTarget(`objects/${row.localPath.split('/').at(-1) ?? ''}`); }}>{t('mappingStatusMapped')}</Button> : null}
-                            {row.kind === 'inbox' && row.resource.present && row.virtualPath ? <Button size="small" color="warning" variant="outlined" onClick={() => void ignore([row.virtualPath!])} disabled={ignoreBusy}>{t('resourceIgnore')}</Button> : null}
-                            {row.kind === 'ignored' && row.resource.present && row.virtualPath ? <Button size="small" color="primary" variant="outlined" onClick={() => void unignore([row.virtualPath!])} disabled={unignoreBusy}>{t('mappingUnignoreAction', { count: 1 })}</Button> : null}
-                            {row.kind === 'paired' && row.resource.present && row.virtualPath ? (
-                             <Button size="small" color="error" variant="outlined" onClick={() => setReleasePaths([row.virtualPath!])} disabled={releaseBusy}>
+                              {row.kind === 'inbox' && row.resource.present ? <Button size="small" color="warning" variant="outlined" onClick={() => void ignore([row.virtualPath])} disabled={ignoreBusy}>{t('resourceIgnore')}</Button> : null}
+                              {row.kind === 'ignored' ? <Button size="small" color="primary" variant="outlined" onClick={() => void unignore([row.virtualPath])} disabled={unignoreBusy}>{t('mappingUnignoreOneAction')}</Button> : null}
+                             {row.kind === 'paired' || row.kind === 'missing' ? (
+                              <Button size="small" color="error" variant="outlined" onClick={() => setReleasePaths([row.virtualPath])} disabled={releaseBusy}>
                                {t('mappingReleaseAction')}
                              </Button>
                             ) : null}
@@ -575,32 +569,13 @@ export function ResourceMappingsPage() {
         open={fingerprintOpen}
         targets={fingerprintDialogTargets}
         busy={fingerprintBusy}
-        error={fingerprintError}
         progress={resources.fingerprintProgress}
         onCancel={resources.cancelFingerprint}
         onCalculate={(virtualPaths, algorithms, forceOverwrite) => void runFingerprints(virtualPaths, algorithms, forceOverwrite)}
         onClose={() => {
           setFingerprintOpen(false);
-          setFingerprintError(null);
         }}
       />
-      <Dialog open={materializeRow !== null} onClose={() => setMaterializeRow(null)} maxWidth="sm" fullWidth>
-        <DialogTitle>{t('mappingStatusMapped')}</DialogTitle>
-        <DialogContent dividers>
-          <TextField autoFocus fullWidth label={t('mappingVirtualPath')} value={materializeTarget} onChange={(event) => setMaterializeTarget(event.target.value)} />
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setMaterializeRow(null)}>{t('cancel')}</Button>
-          <Button variant="contained" onClick={() => {
-            if (!materializeRow?.virtualPath) return;
-            const resource = materializeRow.virtualPath;
-            void resources.materialize(resource, materializeTarget).then(() => setMaterializeRow(null)).catch((error) => {
-              showError(error);
-              reportResourceFailure('mapping', error, { operation: 'materialize', resource });
-            });
-          }}>{t('mappingStatusMapped')}</Button>
-        </DialogActions>
-      </Dialog>
       <ConfirmDialog
         open={releasePaths !== null}
         title={t('mappingReleaseTitle')}

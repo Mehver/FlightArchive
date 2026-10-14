@@ -8,7 +8,7 @@
  * seat, notes), the three boarding-pass slots, a unique downloadable
  * file list of every bound resource (boarding-pass roles first, then
  * attachments). The sheet is strictly read-only; editing and deleting stay
- * available from the list and grid views.
+ * available from the Flights tab in the Reference Library.
  */
 
 import { Box, Chip, Dialog, DialogContent, Divider, IconButton, Tooltip, Typography, useMediaQuery, useTheme } from '@mui/material';
@@ -23,7 +23,7 @@ import { useTranslation, type TranslationKey } from '../i18n';
 import { ResourceImage } from '../resources/ResourceImage';
 import { basename, isImageResource } from '../resources/resourcePaths';
 import { BoardingPassFrame, DEFAULT_FRAME_ASPECT } from '../boardingpass/BoardingPassFrame';
-import { BOARDING_PASS_SLOTS, slotLayout, slotResourcePath, type BoardingPassSlotKey } from '../boardingpass/passPresentation';
+import { BOARDING_PASS_PREVIEW_DIMENSION, BOARDING_PASS_SLOTS, sharedSlotQualityCrop, slotLayout, slotResourcePath, type BoardingPassSlotKey } from '../boardingpass/passPresentation';
 import { airlineLabel, RouteConnector } from './flightDisplay';
 import { AirlineHorizontalLogo, AirlineLogo } from './AirlineLogo';
 import { buildFlightVisualTheme, createBlendedBackground, hexToCss } from '../theme/colors';
@@ -41,6 +41,7 @@ const SLOT_ROLE_LABEL: Record<BoardingPassSlotKey, TranslationKey> = {
 interface FlightFileRow {
   path: string;
   roles: TranslationKey[];
+  qualityCrop?: { width: number; height: number };
 }
 
 /** The flight's bound resources as unique file rows: the three boarding-pass
@@ -50,18 +51,24 @@ interface FlightFileRow {
 function flightFileRows(flight: FlightRecord): FlightFileRow[] {
   const rows: FlightFileRow[] = [];
   const byPath = new Map<string, FlightFileRow>();
-  const add = (path: string | null, role: TranslationKey) => {
+  const add = (path: string | null, role: TranslationKey, qualityCrop?: { width: number; height: number }) => {
     if (path === null) return;
     const existing = byPath.get(path);
     if (existing) {
       if (!existing.roles.includes(role)) existing.roles.push(role);
+      if (qualityCrop && (!existing.qualityCrop
+        || Math.max(qualityCrop.width, qualityCrop.height) < Math.max(existing.qualityCrop.width, existing.qualityCrop.height))) {
+        existing.qualityCrop = qualityCrop;
+      }
       return;
     }
-    const row: FlightFileRow = { path, roles: [role] };
+    const row: FlightFileRow = { path, roles: [role], qualityCrop };
     byPath.set(path, row);
     rows.push(row);
   };
-  for (const slot of BOARDING_PASS_SLOTS) add(slotResourcePath(flight, slot), SLOT_ROLE_LABEL[slot]);
+  for (const slot of BOARDING_PASS_SLOTS) {
+    add(slotResourcePath(flight, slot), SLOT_ROLE_LABEL[slot], sharedSlotQualityCrop(flight, slot));
+  }
   add(flight.electronicBoardingPassResourcePath, 'electronicBoardingPass');
   for (const path of flight.attachmentResourcePaths) add(path, 'attachmentRole');
   return rows;
@@ -69,8 +76,8 @@ function flightFileRows(flight: FlightRecord): FlightFileRow[] {
 
 /** Small row preview: images render a bounded browser thumbnail, every non-image
  *  file shows the same centred generic file icon as the resource picker. */
-function FileRowPreview({ path }: { path: string }) {
-  if (isImageResource(path)) return <ResourceImage resourcePath={path} size={40} alt={basename(path)} />;
+function FileRowPreview({ path, qualityCrop }: { path: string; qualityCrop?: { width: number; height: number } }) {
+  if (isImageResource(path)) return <ResourceImage resourcePath={path} size={40} alt={basename(path)} qualityCrop={qualityCrop} />;
   return (
     <Box
       aria-hidden
@@ -177,6 +184,7 @@ export function FlightDetailDialog({
   return (
     <Dialog
       open={open}
+      keepMounted
       onClose={onClose}
       fullWidth
       maxWidth="md"
@@ -276,7 +284,9 @@ export function FlightDetailDialog({
                     slot={slot}
                     resourcePath={resourcePath}
                     layout={slotLayout(flight, slot)}
-                    layered={false}
+                     layered={false}
+                     maxDimension={BOARDING_PASS_PREVIEW_DIMENSION}
+                     qualityCrop={sharedSlotQualityCrop(flight, slot)}
                   />
                 ) : (
                   // Empty placeholder matching the BoardingPassFrame dimensions
@@ -361,7 +371,7 @@ export function FlightDetailDialog({
             <Box component="ul" sx={{ m: 0, p: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 1 }}>
               {fileRows.map((row) => (
                 <Box component="li" key={row.path} sx={{ display: 'flex', alignItems: 'center', gap: 1.25, minWidth: 0 }}>
-                  <FileRowPreview path={row.path} />
+                  <FileRowPreview path={row.path} qualityCrop={row.qualityCrop} />
                   <Box sx={{ flex: '1 1 auto', minWidth: 0 }}>
                     <Typography variant="body2" noWrap title={row.path} sx={{ fontWeight: 600 }}>
                       {basename(row.path)}

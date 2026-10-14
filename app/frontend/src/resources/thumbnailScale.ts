@@ -8,15 +8,15 @@ export type ThumbnailScale = (typeof THUMBNAIL_SCALES)[number];
 export const THUMBNAIL_PIXEL_BUDGET = 4_000_000;
 export const THUMBNAIL_DIMENSION_LIMIT = 4096;
 export const THUMBNAIL_SOURCE_BYTES_HINT = 2 * 1024 * 1024;
+export const DETAIL_PREVIEW_DIMENSION = 512;
 export const THUMBNAIL_QUALITY_WIDTH = 1280;
 export const THUMBNAIL_QUALITY_HEIGHT = 720;
-
-export interface ThumbnailScaleRequest {
+export interface ThumbnailScaleSource {
   sourceWidth: number;
   sourceHeight: number;
   sourceBytes: number;
-  crop?: { width: number; height: number };
-  maxDimension: number;
+  qualityWidth: number;
+  qualityHeight: number;
 }
 
 /** Largest relay output that remains inside the backend's hard decode budget. */
@@ -35,30 +35,23 @@ export function selectStudioThumbnailScale(source: { sourceWidth: number; source
 }
 
 /**
- * Chooses the smallest supported dyadic scale that reaches the requested crop
- * display quality (within the 1280x720 quality cap). Safety limits are separate
- * upper bounds derived from the complete source: 4 MP, 4096 px, and the
- * conservative compressed-byte hint. If the desired quality is not reachable
- * within those bounds, the largest permitted scale wins.
+ * Chooses the smallest dyadic derivative that meets the fixed detail-preview
+ * quality reference. Consumer canvas size is intentionally absent, so list,
+ * grid and detail presentations of one saved slot share the detail URL. Safety
+ * remains bounded by complete-source dimensions and the source-byte hint.
  */
-export function selectThumbnailScale(request: ThumbnailScaleRequest): ThumbnailScale {
-  const { sourceWidth, sourceHeight, sourceBytes, crop, maxDimension } = request;
-  if (![sourceWidth, sourceHeight, sourceBytes, maxDimension].every(Number.isFinite)
+export function selectThumbnailScale(source: ThumbnailScaleSource): ThumbnailScale {
+  const { sourceWidth, sourceHeight, sourceBytes, qualityWidth, qualityHeight } = source;
+  if (![sourceWidth, sourceHeight, sourceBytes, qualityWidth, qualityHeight].every(Number.isFinite)
     || !Number.isInteger(sourceWidth) || !Number.isInteger(sourceHeight) || !Number.isInteger(sourceBytes)
-    || sourceWidth <= 0 || sourceHeight <= 0 || sourceBytes <= 0 || maxDimension <= 0) {
+    || sourceWidth <= 0 || sourceHeight <= 0 || sourceBytes <= 0 || qualityWidth <= 0 || qualityHeight <= 0) {
     throw new Error('invalid-thumbnail-scale-input');
   }
-  const displayWidth = crop?.width ?? sourceWidth;
-  const displayHeight = crop?.height ?? sourceHeight;
-  if (![displayWidth, displayHeight].every(Number.isFinite) || displayWidth <= 0 || displayHeight <= 0) {
-    throw new Error('invalid-thumbnail-scale-input');
-  }
-
   const desired = Math.min(
     1,
-    maxDimension / Math.max(displayWidth, displayHeight),
-    THUMBNAIL_QUALITY_WIDTH / displayWidth,
-    THUMBNAIL_QUALITY_HEIGHT / displayHeight,
+    DETAIL_PREVIEW_DIMENSION / Math.max(qualityWidth, qualityHeight),
+    THUMBNAIL_QUALITY_WIDTH / qualityWidth,
+    THUMBNAIL_QUALITY_HEIGHT / qualityHeight,
   );
   const budget = Math.min(
     1,
@@ -69,6 +62,5 @@ export function selectThumbnailScale(request: ThumbnailScaleRequest): ThumbnailS
   );
   const permitted = THUMBNAIL_SCALES.filter((scale) => scale <= budget);
   const largestPermitted = permitted[0] ?? THUMBNAIL_SCALES[THUMBNAIL_SCALES.length - 1];
-  const qualityScale = [...permitted].reverse().find((scale) => scale >= desired);
-  return qualityScale ?? largestPermitted;
+  return [...permitted].reverse().find((scale) => scale >= desired) ?? largestPermitted;
 }
