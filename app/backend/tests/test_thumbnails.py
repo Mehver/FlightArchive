@@ -904,6 +904,26 @@ def test_inspect_prefix_applies_png_header_exif_without_pixel_decode(monkeypatch
     assert loads == []
 
 
+def test_png_tail_orientation_rejects_exif_lookalike_inside_idat():
+    import struct
+    import zlib
+
+    from flightarchive.thumbnail import _png_tail_orientation
+
+    exif = Image.Exif()
+    exif[274] = 6
+    png = _image_bytes(exif=exif)
+    marker = png.index(b"eXIf")
+    length = int.from_bytes(png[marker - 4:marker], "big")
+    embedded = png[marker - 4:marker + 8 + length]
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    tail = chunk(b"IDAT", b"compressed-prefix" + embedded + b"compressed-suffix") + chunk(b"IEND", b"")
+    assert _png_tail_orientation(tail) == 1
+
+
 def test_thumbnail_head_of_png_larger_than_prefix_returns_geometry_without_pixel_decode(tmp_path, monkeypatch):
     from PIL.PngImagePlugin import PngImageFile
 
@@ -1007,7 +1027,7 @@ def test_small_png_late_exif_in_prefix_has_normalized_head_and_matching_pixels(t
         _close(client)
 
 
-def test_png_exif_beyond_prefix_is_rejected_without_cache(tmp_path):
+def test_large_png_post_idat_exif_in_tail_has_normalized_head_and_get(tmp_path):
     from flightarchive.thumbnail import MAX_HEADER_BYTES
 
     exif = Image.Exif()
@@ -1019,9 +1039,79 @@ def test_png_exif_beyond_prefix_is_rejected_without_cache(tmp_path):
         "virtual_path": "late.png", "local_path": "late.png",
     }])
     try:
+        head = client.head("/api/thumbnails/late.png?scale=0.5")
+        assert head.status_code == 200
+        assert (head.headers["x-source-width"], head.headers["x-source-height"]) == ("768", "1024")
+        assert (head.headers["x-thumbnail-width"], head.headers["x-thumbnail-height"]) == ("384", "512")
+
         response = client.get("/api/thumbnails/late.png?scale=0.5")
-        assert response.status_code == 415
-        assert response.json()["error"]["code"] == "unsupported-header-orientation"
-        assert not (tmp_path / "cache").exists() or not list((tmp_path / "cache").glob("thumb-*"))
+        assert response.status_code == 200, response.text
+        for name in ("x-source-width", "x-source-height", "x-thumbnail-width", "x-thumbnail-height"):
+            assert response.headers[name] == head.headers[name]
+        with Image.open(io.BytesIO(response.content)) as image:
+            assert image.size == (384, 512)
+    finally:
+        _close(client)
+
+
+def test_large_png_pre_idat_exif_still_has_normalized_head_and_get(tmp_path):
+    from flightarchive.thumbnail import MAX_HEADER_BYTES
+
+    exif = Image.Exif()
+    exif[274] = 6
+    payload = _noisy_png_bytes(size=(1024, 768), exif=exif)
+    assert len(payload) > MAX_HEADER_BYTES
+    assert 0 < payload.find(b"eXIf") < payload.find(b"IDAT") < MAX_HEADER_BYTES
+    _, client = _client(tmp_path, {"early.png": payload}, [{
+        "virtual_path": "early.png", "local_path": "early.png",
+    }])
+    try:
+        head = client.head("/api/thumbnails/early.png?scale=0.5")
+        result = client.get("/api/thumbnails/early.png?scale=0.5")
+        assert head.status_code == result.status_code == 200
+        assert (head.headers["x-source-width"], head.headers["x-source-height"]) == ("768", "1024")
+        assert (result.headers["x-thumbnail-width"], result.headers["x-thumbnail-height"]) == ("384", "512")
+    finally:
+        _close(client)
+
+
+def test_large_png_without_exif_still_renders(tmp_path):
+    from flightarchive.thumbnail import MAX_HEADER_BYTES
+
+    payload = _noisy_png_bytes(size=(1024, 768))
+    assert len(payload) > MAX_HEADER_BYTES and b"eXIf" not in payload
+    _, client = _client(tmp_path, {"plain.png": payload}, [{
+        "virtual_path": "plain.png", "local_path": "plain.png",
+    }])
+    try:
+        head = client.head("/api/thumbnails/plain.png?scale=0.5")
+        result = client.get("/api/thumbnails/plain.png?scale=0.5")
+        assert head.status_code == result.status_code == 200
+        assert (head.headers["x-source-width"], head.headers["x-source-height"]) == ("1024", "768")
+        assert (result.headers["x-thumbnail-width"], result.headers["x-thumbnail-height"]) == ("512", "384")
+    finally:
+        _close(client)
+
+
+def test_png_exif_larger_than_tail_window_stays_neutral_then_uses_orientation_415(tmp_path):
+    from flightarchive.thumbnail import MAX_HEADER_BYTES, MAX_TAIL_BYTES
+
+    exif = Image.Exif()
+    exif[270] = "x" * (MAX_TAIL_BYTES + 1024)
+    exif[274] = 6
+    payload = _move_png_exif_after_idat(_noisy_png_bytes(size=(1024, 768), exif=exif))
+    marker = payload.find(b"eXIf")
+    assert len(payload) > MAX_HEADER_BYTES
+    assert marker > MAX_HEADER_BYTES and marker < len(payload) - MAX_TAIL_BYTES
+    _, client = _client(tmp_path, {"oversized-exif.png": payload}, [{
+        "virtual_path": "oversized-exif.png", "local_path": "oversized-exif.png",
+    }])
+    try:
+        head = client.head("/api/thumbnails/oversized-exif.png?scale=0.5")
+        assert head.status_code == 200
+        assert (head.headers["x-source-width"], head.headers["x-source-height"]) == ("1024", "768")
+        result = client.get("/api/thumbnails/oversized-exif.png?scale=0.5")
+        assert result.status_code == 415
+        assert result.json()["error"]["code"] == "unsupported-header-orientation"
     finally:
         _close(client)

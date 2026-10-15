@@ -14,6 +14,7 @@ import os
 import re
 import stat
 import uuid
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -31,6 +32,7 @@ MAX_SOURCE_BYTES = 256 * 1024 * 1024
 MAX_SOURCE_PIXELS = 160_000_000
 MAX_SOURCE_DIMENSION = 65_535
 MAX_HEADER_BYTES = 256 * 1024
+MAX_TAIL_BYTES = 256 * 1024
 MAX_OUTPUT_PIXELS = 4_000_000
 MAX_OUTPUT_DIMENSION = 4096
 MAX_OUTPUT_BYTES = 4 * 1024 * 1024
@@ -139,6 +141,63 @@ def _png_prefix_orientation(prefix: bytes) -> int:
             return 1
         cursor = data_end + 4
     return 1
+
+
+def _png_tail_orientation(tail: bytes) -> int:
+    """Best-effort EXIF orientation from a bounded PNG tail window.
+
+    The window can begin inside IDAT data, so candidates cannot be found by
+    walking forward from the PNG signature. Require complete, CRC-valid chunks,
+    valid EXIF, a later IEND, and no complete IDAT after the candidate.
+    """
+    cursor = len(tail)
+    while True:
+        marker = tail.rfind(b"eXIf", 0, cursor)
+        if marker < 0:
+            return 1
+        cursor = marker
+        if marker < 4:
+            continue
+        length = int.from_bytes(tail[marker - 4:marker], "big")
+        data_start = marker + 4
+        data_end = data_start + length
+        if data_end + 4 > len(tail):
+            continue
+        expected = int.from_bytes(tail[data_end:data_end + 4], "big")
+        if zlib.crc32(tail[marker:data_end]) & 0xFFFFFFFF != expected:
+            continue
+
+        # From a real eXIf chunk, the remaining bytes must continue on PNG
+        # chunk boundaries through IEND. This rejects a byte-for-byte eXIf
+        # lookalike embedded inside compressed IDAT data.
+        next_chunk = data_end + 4
+        reaches_iend = False
+        while next_chunk + 12 <= len(tail):
+            next_length = int.from_bytes(tail[next_chunk:next_chunk + 4], "big")
+            next_type_start = next_chunk + 4
+            next_data_end = next_type_start + 4 + next_length
+            if next_data_end + 4 > len(tail):
+                break
+            next_type = tail[next_type_start:next_type_start + 4]
+            next_expected = int.from_bytes(tail[next_data_end:next_data_end + 4], "big")
+            if zlib.crc32(tail[next_type_start:next_data_end]) & 0xFFFFFFFF != next_expected:
+                break
+            if next_type == b"IDAT":
+                break
+            next_chunk = next_data_end + 4
+            if next_type == b"IEND" and next_length == 0:
+                reaches_iend = True
+                break
+        if not reaches_iend:
+            continue
+        exif = Image.Exif()
+        try:
+            exif.load(tail[data_start:data_end])
+        except (OSError, ValueError, SyntaxError):
+            continue
+        orientation = exif.get(274)
+        if orientation in (1, 2, 3, 4, 5, 6, 7, 8):
+            return orientation
 
 
 class ThumbnailCache:
@@ -374,10 +433,44 @@ class ThumbnailService:
             raise
         except httpx.HTTPError as exc:
             raise ThumbnailError(503, "resource-unavailable", "source resource is unavailable") from exc
-        return await asyncio.to_thread(self._inspect_prefix, b"".join(chunks), scale)
+        prefix = b"".join(chunks)
+        tail_orientation = None
+        if (prefix[:8] == b"\x89PNG\r\n\x1a\n"
+                and source.size > MAX_HEADER_BYTES
+                and _png_prefix_orientation(prefix) == 1):
+            tail = await self._tail_source(virtual_path, source)
+            tail_orientation = await asyncio.to_thread(_png_tail_orientation, tail)
+        return await asyncio.to_thread(self._inspect_prefix, prefix, scale, tail_orientation)
+
+    async def _tail_source(self, virtual_path: str, source: SourceIdentity) -> bytes:
+        start = max(0, source.size - MAX_TAIL_BYTES)
+        end = source.size - 1
+        try:
+            async with self._client.stream(
+                "GET", _resource_url(virtual_path), headers={"Range": f"bytes={start}-{end}"},
+            ) as response:
+                if response.headers.get("etag") != source.etag:
+                    raise _SourceChanged
+                permitted_statuses = {206, 200} if source.size <= MAX_TAIL_BYTES else {206}
+                if response.status_code not in permitted_statuses:
+                    raise ThumbnailError(503, "resource-range-unavailable", "source tail range is unavailable")
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > MAX_TAIL_BYTES:
+                        raise ThumbnailError(503, "resource-range-unavailable", "source tail range exceeded its bound")
+                    chunks.append(chunk)
+        except ThumbnailError:
+            raise
+        except _SourceChanged:
+            raise
+        except httpx.HTTPError as exc:
+            raise ThumbnailError(503, "resource-unavailable", "source resource is unavailable") from exc
+        return b"".join(chunks)
 
     @staticmethod
-    def _inspect_prefix(prefix: bytes, scale: float) -> ImageGeometry:
+    def _inspect_prefix(prefix: bytes, scale: float, png_orientation: int | None = None) -> ImageGeometry:
         try:
             with Image.open(io.BytesIO(prefix)) as image:
                 image_format = (image.format or "").upper()
@@ -387,12 +480,14 @@ class ThumbnailService:
                 # JPEG parses EXIF while opening its marker segments and PNG
                 # exposes a header eXIf chunk in ``info``.  Anything else must
                 # not make Pillow load every pixel hunting for absent metadata;
-                # for PNG an eXIf chunk placed after IDAT is recovered directly
-                # from the bounded prefix without decoding it.
-                if image_format == "JPEG" or "exif" in image.info:
+                # for PNG an eXIf chunk is recovered from bounded prefix/tail
+                # bytes without decoding pixels.
+                if image_format == "JPEG":
                     orientation = image.getexif().get(274, 1)
                 elif image_format == "PNG":
-                    orientation = _png_prefix_orientation(prefix)
+                    orientation = png_orientation if png_orientation is not None else _png_prefix_orientation(prefix)
+                elif "exif" in image.info:
+                    orientation = image.getexif().get(274, 1)
                 else:
                     orientation = 1
         except ThumbnailError:

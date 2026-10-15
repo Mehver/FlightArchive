@@ -73,6 +73,23 @@ def test_rfg_child_lifespan_public_http_and_spa_order(tmp_path):
         assert client.get("/client/route").text == "<html>FlightArchive</html>"
 
 
+def test_rfg_public_http_supports_offset_tail_range(tmp_path):
+    application, _ = _app(tmp_path)
+    mapping = {"entries": [{"virtual_path": "documents/ticket.txt", "local_path": "ticket.txt"}]}
+    payload = b"ticket"
+    start = max(0, len(payload) - 4)
+
+    with TestClient(application) as client:
+        assert client.put("/api/v1/meta/map", json=mapping).status_code == 200
+        response = client.get(
+            "/res/documents/ticket.txt",
+            headers={"Range": f"bytes={start}-{len(payload) - 1}"},
+        )
+        assert response.status_code == 206
+        assert response.content == payload[start:]
+        assert response.headers["content-range"] == f"bytes {start}-{len(payload) - 1}/{len(payload)}"
+
+
 def test_rfg_public_http_preserves_and_renames_mapping_for_absent_source(tmp_path):
     application, _ = _app(tmp_path)
     original = {"entries": [{
