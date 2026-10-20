@@ -122,8 +122,9 @@ describe('TasksPage day pagination', () => {
     renderWithProviders(<TasksPage />);
 
     expect(await screen.findByRole('heading', { name: /September 24, 2026/i })).toBeTruthy();
+    await waitFor(() => expect(intersectionCallback).toBeTypeOf('function'));
     await act(async () => {
-      intersectionCallback?.([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
+      intersectionCallback!([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
     });
 
     expect(await screen.findByRole('heading', { name: /September 22, 2026/i })).toBeTruthy();
@@ -132,7 +133,7 @@ describe('TasksPage day pagination', () => {
     expect(screen.getByText('No more task history.')).toBeTruthy();
 
     await act(async () => {
-      intersectionCallback?.([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
+      intersectionCallback!([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
