@@ -78,6 +78,7 @@ def test_release_workflow_has_quality_gates_before_mutations_and_correct_routes(
     workflow = (ROOT / ".github/workflows/docker-image.yml").read_text(encoding="utf-8")
     steps = _workflow_steps(workflow)
 
+    assert "if: ${{ !github.event.repository.private }}" in workflow
     assert "release:\n    types: [published]" in workflow
     assert "\n  pull_request:\n" not in workflow
     assert "\n  push:\n" not in workflow
